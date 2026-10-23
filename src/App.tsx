@@ -15,6 +15,7 @@ import { SyncBackupModal } from './components/SyncBackupModal';
 import { AddCycleModal } from './components/AddCycleModal';
 import { calculateCostPerRai, getTodayIso } from './utils/thaiAgUnits';
 import {
+  DEFAULT_WEBHOOK_URL,
   syncFromGoogleSheets,
   pushTransactionToGoogleSheets,
   pushCycleToGoogleSheets
@@ -50,7 +51,12 @@ export function App() {
         if (currentSettings) {
           if (currentSettings.activeMemberId) setActiveMemberId(currentSettings.activeMemberId);
           if (currentSettings.activeCycleId) setActiveCycleId(currentSettings.activeCycleId);
-          if (currentSettings.googleSheetWebhookUrl) activeWebhook = currentSettings.googleSheetWebhookUrl;
+          if (currentSettings.googleSheetWebhookUrl) {
+            activeWebhook = currentSettings.googleSheetWebhookUrl;
+          } else {
+            activeWebhook = DEFAULT_WEBHOOK_URL;
+            await db.settings.update('default', { googleSheetWebhookUrl: DEFAULT_WEBHOOK_URL });
+          }
         }
       }
 

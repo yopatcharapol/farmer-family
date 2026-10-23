@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { X, Download, Upload, Cloud, Copy, Check, Trash2, Share2, RefreshCw } from 'lucide-react';
 import { db, clearAllData } from '../db/db';
-import { FULL_APPS_SCRIPT_CODE, syncFromGoogleSheets } from '../services/cloudSync';
+import { FULL_APPS_SCRIPT_CODE, syncFromGoogleSheets, DEFAULT_WEBHOOK_URL } from '../services/cloudSync';
 
 interface SyncBackupModalProps {
   isOpen: boolean;
@@ -20,7 +20,7 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({
 }) => {
   if (!isOpen) return null;
 
-  const [url, setUrl] = useState<string>(googleSheetWebhookUrl);
+  const [url, setUrl] = useState<string>(googleSheetWebhookUrl || DEFAULT_WEBHOOK_URL);
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [copiedLink, setCopiedLink] = useState<boolean>(false);
   const [syncLoading, setSyncLoading] = useState<boolean>(false);

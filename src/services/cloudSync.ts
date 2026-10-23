@@ -6,6 +6,8 @@ import { Transaction, CropCycle } from '../types';
  * ช่วยให้อุปกรณ์ของ พ่อ, แม่, พี่, และเรา มีข้อมูลตรงกัน 100%
  */
 
+export const DEFAULT_WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycbyL_T7Us7Irx9FI0eP_XjwPv6tDSdmx4zPHZGOFVq2RWocVJT_m-upr_dmijpYSemGHmQ/exec';
+
 // 1. ดึงข้อมูลล่าสุดจาก Google Sheets ลงมาที่เครื่อง
 export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ success: boolean; message: string; count: number }> {
   if (!webhookUrl || !webhookUrl.startsWith('http')) {
@@ -232,3 +234,4 @@ function formatDateIso(val) {
   }
   return String(val);
 }`;
+

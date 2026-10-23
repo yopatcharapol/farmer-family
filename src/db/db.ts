@@ -39,14 +39,26 @@ export async function initializeDatabase() {
   }
 
   const settingsCount = await db.settings.count();
+  const defaultWebhook = 'https://script.google.com/macros/s/AKfycbyL_T7Us7Irx9FI0eP_XjwPv6tDSdmx4zPHZGOFVq2RWocVJT_m-upr_dmijpYSemGHmQ/exec';
+
   if (settingsCount === 0) {
     await db.settings.add({
       id: 'default',
       activeMemberId: 'dad',
       activeCycleId: '',
-      autoSync: false,
+      googleSheetWebhookUrl: defaultWebhook,
+      autoSync: true,
       highContrast: false,
       soundEnabled: true
     });
+  } else {
+    // อัปเดตการตั้งค่าในเครื่องเดิมให้ชี้ไปที่ Google Sheet ของครอบครัวทันที
+    const current = await db.settings.get('default');
+    if (!current?.googleSheetWebhookUrl || !current.googleSheetWebhookUrl.includes('AKfycb')) {
+      await db.settings.update('default', {
+        googleSheetWebhookUrl: defaultWebhook,
+        autoSync: true
+      });
+    }
   }
 }
