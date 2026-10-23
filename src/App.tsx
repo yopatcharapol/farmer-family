@@ -224,6 +224,7 @@ export function App() {
         isOpen={isEntryModalOpen}
         initialType={entryType}
         activeMemberId={activeMemberId}
+        currentCycle={currentCycle}
         cycleId={currentCycle?.id || 'default'}
         onClose={() => setIsEntryModalOpen(false)}
         onSave={handleSaveTransaction}
