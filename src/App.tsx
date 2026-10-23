@@ -162,15 +162,10 @@ export function App() {
 
   // Manual sync button
   const handleManualSync = async () => {
-    const currentSettings = await db.settings.get('default');
-    if (!currentSettings?.googleSheetWebhookUrl) {
-      alert('กรุณาใส่ลิงก์ Google Sheets Webhook ในเมนูตั้งค่า ⚙️ ก่อนครับ');
-      setIsSettingsOpen(true);
-      return;
-    }
-
     setIsSyncing(true);
-    const res = await syncFromGoogleSheets(currentSettings.googleSheetWebhookUrl);
+    const currentSettings = await db.settings.get('default');
+    const targetUrl = currentSettings?.googleSheetWebhookUrl || DEFAULT_WEBHOOK_URL;
+    const res = await syncFromGoogleSheets(targetUrl);
     setIsSyncing(false);
     alert(res.message);
   };

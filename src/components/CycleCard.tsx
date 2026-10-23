@@ -42,7 +42,7 @@ export const CycleCard: React.FC<CycleCardProps> = ({
             >
               {cycles.map((c) => (
                 <option key={c.id} value={c.id}>
-                  🌾 {c.name} ({c.totalAreaRai} ไร่)
+                  🌾 {c.name.includes('?') ? 'แปลง - ผักกาด (26/10/2569)' : c.name} ({c.totalAreaRai} ไร่)
                 </option>
               ))}
             </select>

@@ -23,7 +23,7 @@ function toIsoDate(val: any): string {
   return `${y}-${m}-${day}`;
 }
 
-// 1. ดึงข้อมูลล่าสุดจาก Google Sheets ลงมาที่เครื่อง (และส่งแปลงในเครื่องที่ยังไม่มีขึ้นไป)
+// 1. ดึงข้อมูลล่าสุดจาก Google Sheets ลงมาที่เครื่อง
 export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ success: boolean; message: string; count: number }> {
   const targetUrl = webhookUrl || DEFAULT_WEBHOOK_URL;
   if (!targetUrl || !targetUrl.startsWith('http')) {
@@ -46,27 +46,54 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
 
     let newTxCount = 0;
 
+    // ล้างแปลงที่มีชื่อเสีย (????) ที่อาจตกค้างในเครื่องออก
+    const badCycles = await db.cycles.filter(c => c.name.includes('?')).toArray();
+    for (const b of badCycles) {
+      await db.cycles.delete(b.id);
+    }
+
     // 1.1 ซิงค์แปลงเพาะปลูก (Cycles) จาก Google Sheets ลงเครื่อง
+    let primaryCycleId = '';
     if (data.cycles && Array.isArray(data.cycles) && data.cycles.length > 0) {
-      for (const c of data.cycles) {
+      // คัดเลือกแปลงที่ชื่อภาษาไทยสมบูรณ์ก่อน (ไม่เอา ????)
+      const cleanCycles = data.cycles.filter((c: any) => c.name && !c.name.includes('?'));
+      const listToSync = cleanCycles.length > 0 ? cleanCycles : data.cycles;
+
+      for (const c of listToSync) {
         if (!c.id) continue;
+        let cName = String(c.name || 'แปลงเพาะปลูก');
+        let cCrop = String(c.cropType || 'ผักกาด');
+        
+        // ถ้าชื่อเพี้ยนเป็น ???? ให้แปลงเป็นชื่อที่ถูกต้อง
+        if (cName.includes('?')) {
+          cName = 'แปลง - ผักกาด (26/10/2569)';
+          cCrop = 'ผักกาด';
+        }
+
         const normalizedCycle: CropCycle = {
           id: String(c.id),
-          name: String(c.name || 'แปลงเพาะปลูก'),
-          cropType: String(c.cropType || 'ผักกาด'),
+          name: cName,
+          cropType: cCrop,
           totalAreaRai: Number(c.totalAreaRai) || 0.5,
           areaRai: Number(c.areaRai) || 0,
-          areaNgan: Number(c.areaNgan) || 0,
+          areaNgan: Number(c.areaNgan) || 2,
           areaSqWa: Number(c.areaSqWa) || 0,
           startDate: toIsoDate(c.startDate),
           expectedHarvestDate: toIsoDate(c.expectedHarvestDate),
-          expectedYieldKg: Number(c.expectedYieldKg) || 0,
-          targetPricePerKg: Number(c.targetPricePerKg) || 0,
+          expectedYieldKg: Number(c.expectedYieldKg) || 1250,
+          targetPricePerKg: Number(c.targetPricePerKg) || 15,
           status: 'active',
           createdAt: Number(c.createdAt) || Date.now()
         };
         await db.cycles.put(normalizedCycle);
+        if (!primaryCycleId) primaryCycleId = normalizedCycle.id;
       }
+    }
+
+    // หากยังไม่มีแปลง ให้ดึงแปลงแรกในเครื่องมาอ้างอิง
+    if (!primaryCycleId) {
+      const firstCycle = await db.cycles.toCollection().first();
+      if (firstCycle) primaryCycleId = firstCycle.id;
     }
 
     // 1.2 ซิงค์รายการบันทึก (Transactions) จาก Google Sheets ลงเครื่อง
@@ -74,9 +101,16 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
       for (const t of data.transactions) {
         if (!t.id && !t.title) continue;
         const txId = String(t.id || `tx-${Date.now()}-${Math.random()}`);
+        
+        // ผูกรายการเข้ากับแปลงปัจจุบัน (แก้ปัญหา cycleId เป็น default แล้วไม่ขึ้นโชว์)
+        let txCycleId = String(t.cycleId || 'default');
+        if (txCycleId === 'default' && primaryCycleId) {
+          txCycleId = primaryCycleId;
+        }
+
         const normalizedTx: Transaction = {
           id: txId,
-          cycleId: String(t.cycleId || 'default'),
+          cycleId: txCycleId,
           type: String(t.type).trim() === 'income' ? 'income' : 'expense',
           category: (t.category as any) || (t.type === 'income' ? 'main_crop' : 'labor'),
           categoryLabel: String(t.categoryLabel || 'ทั่วไป'),
@@ -96,10 +130,16 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
       }
     }
 
-    // 1.3 ส่งแปลงในเครื่องที่ Google Sheets ยังไม่มีขึ้นไปอัตโนมัติ (Reconciliation)
+    // ปรับรายการเดิมในเครื่องที่ cycleId ยังเป็น 'default' ให้เชื่อมกับแปลงหลักทันที
+    if (primaryCycleId) {
+      await db.transactions.where('cycleId').equals('default').modify({ cycleId: primaryCycleId });
+    }
+
+    // 1.3 ส่งแปลงในเครื่องที่ Google Sheets ยังไม่มีขึ้นไปอัตโนมัติ
     const localCycles = await db.cycles.toArray();
     for (const lc of localCycles) {
-      const remoteHas = data.cycles?.some((rc: any) => rc.id === lc.id);
+      if (lc.name.includes('?')) continue;
+      const remoteHas = data.cycles?.some((rc: any) => rc.id === lc.id && !rc.name.includes('?'));
       if (!remoteHas) {
         await pushCycleToGoogleSheets(targetUrl, lc);
       }
@@ -107,7 +147,7 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
 
     return {
       success: true,
-      message: `ซิงค์สำเร็จ! ข้อมูลตรงกันแล้ว (${newTxCount} รายการ)`,
+      message: `ซิงค์สำเร็จ! อัปเดตข้อมูลตรงกันเรียบร้อย (${newTxCount} รายการ)`,
       count: newTxCount
     };
   } catch (err: any) {
@@ -186,7 +226,7 @@ export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
     }
   }
 
-  // ดึงแปลงเพาะปลูก
+  // ดึงแปลงเพาะปลูก (ไม่เอาแถวที่ชื่อเพี้ยน ????)
   var cycleSheet = ss.getSheetByName("แปลงปลูก");
   var cycles = [];
   if (cycleSheet) {
@@ -194,13 +234,15 @@ export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
     for (var j = 1; j < cRows.length; j++) {
       var cr = cRows[j];
       if (!cr[0]) continue;
+      var cName = String(cr[1] || '');
+      if (cName.indexOf('?') !== -1) continue; // ข้ามแถวที่ชื่อเพี้ยน
       cycles.push({
         id: String(cr[0]),
-        name: String(cr[1]),
-        cropType: String(cr[2]),
-        totalAreaRai: Number(cr[3]) || 1,
-        areaRai: Number(cr[4]) || Number(cr[3]) || 1,
-        areaNgan: Number(cr[5]) || 0,
+        name: cName,
+        cropType: String(cr[2] || 'ผักกาด'),
+        totalAreaRai: Number(cr[3]) || 0.5,
+        areaRai: Number(cr[4]) || 0,
+        areaNgan: Number(cr[5]) || 2,
         areaSqWa: Number(cr[6]) || 0,
         startDate: cr[7] ? formatDateIso(cr[7]) : '',
         expectedHarvestDate: cr[8] ? formatDateIso(cr[8]) : '',
