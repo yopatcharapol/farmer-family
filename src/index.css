@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Big touch target utility */
+  button, a, input, select {
+    touch-action: manipulation;
+  }
+}
+
+/* Custom smooth active animation for buttons */
+.btn-touch-active:active {
+  transform: scale(0.97);
+  transition: transform 0.08s ease-out;
+}
+
+/* Scrollbar styling for touch screens */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
