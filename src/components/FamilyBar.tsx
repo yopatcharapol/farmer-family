@@ -4,16 +4,20 @@ import { Settings, RefreshCw, Smartphone } from 'lucide-react';
 
 interface FamilyBarProps {
   activeMemberId: FamilyMemberId;
+  isSyncing?: boolean;
   onSelectMember: (id: FamilyMemberId) => void;
   onOpenSettings: () => void;
   onOpenUnitConverter: () => void;
+  onSync?: () => void;
 }
 
 export const FamilyBar: React.FC<FamilyBarProps> = ({
   activeMemberId,
+  isSyncing = false,
   onSelectMember,
   onOpenSettings,
-  onOpenUnitConverter
+  onOpenUnitConverter,
+  onSync
 }) => {
   return (
     <header className="bg-emerald-800 text-white shadow-md sticky top-0 z-20">
@@ -27,13 +31,26 @@ export const FamilyBar: React.FC<FamilyBarProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center space-x-1">
+        <div className="flex items-center space-x-1.5">
+          {onSync && (
+            <button
+              onClick={onSync}
+              disabled={isSyncing}
+              className={`p-2 rounded-xl bg-emerald-700/80 hover:bg-emerald-600 text-emerald-100 flex items-center gap-1 text-xs font-bold btn-touch-active shadow-2xs ${
+                isSyncing ? 'animate-pulse opacity-70' : ''
+              }`}
+              title="ดึงข้อมูลล่าสุดจาก Google Sheets (ซิงค์ข้ามเครื่อง)"
+            >
+              <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin text-amber-300' : ''}`} />
+              <span className="hidden sm:inline">{isSyncing ? 'กำลังซิงค์...' : 'ซิงค์'}</span>
+            </button>
+          )}
           <button
             onClick={onOpenUnitConverter}
             className="p-2 rounded-xl bg-emerald-700/80 hover:bg-emerald-600 text-emerald-100 flex items-center gap-1 text-xs font-medium btn-touch-active"
             title="แปลงหน่วย ไร่-งาน / ถัง-เกวียน"
           >
-            <span>⚖️ แปลงหน่วย</span>
+            <span>⚖️</span>
           </button>
           <button
             onClick={onOpenSettings}

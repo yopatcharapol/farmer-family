@@ -34,6 +34,7 @@ export const AddCycleModal: React.FC<AddCycleModalProps> = ({
   const [expectedYieldKg, setExpectedYieldKg] = useState('5000');
   const [targetPricePerKg, setTargetPricePerKg] = useState('14.5');
   const [isManuallyEditedDate, setIsManuallyEditedDate] = useState(false);
+  const [isUserCustomName, setIsUserCustomName] = useState(false);
 
   // คำนวณวันเก็บเกี่ยวอัตโนมัติตามชนิดพืชและวันเริ่มปลูก
   useEffect(() => {
@@ -51,9 +52,9 @@ export const AddCycleModal: React.FC<AddCycleModalProps> = ({
       setExpectedYieldKg(String(Math.round(totalRai * config.defaultYieldKgPerRai)));
       setTargetPricePerKg(String(config.defaultPricePerKg));
 
-      // ถ้าชื่อยังว่าง ให้ตั้งชื่อแนะนำให้อัตโนมัติ เช่น "แปลงนา - ข้าว (เริ่ม 23/10/2569)"
-      if (!name || name.includes('รอบ') || name.includes('แปลง')) {
-        setName(`แปลง - ${cropType} (${formatDateSlashThai(startDate)})`);
+      // ถ้าชื่อยังว่างและผู้ใช้ยังไม่ได้พิมพ์ชื่อเอง ให้ตั้งชื่อแนะนำให้อัตโนมัติ
+      if (!name && !isUserCustomName) {
+        setName(`แปลง${cropType} (${formatDateSlashThai(startDate)})`);
       }
     }
   }, [cropType, startDate, areaRai, areaNgan, areaSqWa]);
@@ -66,6 +67,10 @@ export const AddCycleModal: React.FC<AddCycleModalProps> = ({
     if (config) {
       const autoDate = calculateHarvestDate(startDate, config.daysToHarvest);
       setExpectedHarvestDate(autoDate);
+    }
+    // ถ้าผู้ใช้ยังไม่ได้พิมพ์ชื่อเอง ให้เปลี่ยนชื่อแนะนำตามพืช
+    if (!isUserCustomName) {
+      setName(`แปลง${newType} (${formatDateSlashThai(startDate)})`);
     }
   };
 
@@ -163,7 +168,10 @@ export const AddCycleModal: React.FC<AddCycleModalProps> = ({
               required
               placeholder="เช่น แปลงผักกาดสวนหลังบ้าน, แปลงนายางพารา 10 ไร่"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                setName(e.target.value);
+                setIsUserCustomName(true);
+              }}
               className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm font-semibold focus:bg-white focus:outline-emerald-600"
             />
           </div>

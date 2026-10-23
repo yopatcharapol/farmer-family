@@ -14,10 +14,16 @@ import { ThaiUnitConverterModal } from './components/ThaiUnitConverterModal';
 import { SyncBackupModal } from './components/SyncBackupModal';
 import { AddCycleModal } from './components/AddCycleModal';
 import { calculateCostPerRai, getTodayIso } from './utils/thaiAgUnits';
+import {
+  syncFromGoogleSheets,
+  pushTransactionToGoogleSheets,
+  pushCycleToGoogleSheets
+} from './services/cloudSync';
 
 export function App() {
   const [activeMemberId, setActiveMemberId] = useState<FamilyMemberId>('dad');
   const [activeCycleId, setActiveCycleId] = useState<string>('');
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
   
   // Modals state
   const [isEntryModalOpen, setIsEntryModalOpen] = useState(false);
@@ -26,13 +32,34 @@ export function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isAddCycleOpen, setIsAddCycleOpen] = useState(false);
 
-  // Initialize DB on first launch
+  // Initialize DB & Sync on first launch
   useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const syncParam = urlParams.get('sync');
+
     initializeDatabase().then(async () => {
-      const settings = await db.settings.get('default');
-      if (settings) {
-        if (settings.activeMemberId) setActiveMemberId(settings.activeMemberId);
-        if (settings.activeCycleId) setActiveCycleId(settings.activeCycleId);
+      let activeWebhook = '';
+
+      // ถ้าเปิดผ่านลิงก์ที่แชร์มา (?sync=URL) ให้บันทึกตั้งค่าอัตโนมัติทันที
+      if (syncParam) {
+        await db.settings.update('default', { googleSheetWebhookUrl: syncParam });
+        activeWebhook = syncParam;
+        window.history.replaceState({}, '', window.location.pathname);
+      } else {
+        const currentSettings = await db.settings.get('default');
+        if (currentSettings) {
+          if (currentSettings.activeMemberId) setActiveMemberId(currentSettings.activeMemberId);
+          if (currentSettings.activeCycleId) setActiveCycleId(currentSettings.activeCycleId);
+          if (currentSettings.googleSheetWebhookUrl) activeWebhook = currentSettings.googleSheetWebhookUrl;
+        }
+      }
+
+      // ดึงข้อมูลล่าสุดจาก Google Sheets ทันที (เพื่อให้เห็นประวัติของคนอื่น)
+      if (activeWebhook) {
+        setIsSyncing(true);
+        syncFromGoogleSheets(activeWebhook).finally(() => {
+          setIsSyncing(false);
+        });
       }
     });
   }, []);
@@ -98,6 +125,12 @@ export function App() {
     await db.cycles.add(newCycle);
     setActiveCycleId(newCycle.id);
     await db.settings.update('default', { activeCycleId: newCycle.id });
+
+    // ยิงแปลงปลูกขึ้น Google Sheets
+    const currentSettings = await db.settings.get('default');
+    if (currentSettings?.googleSheetWebhookUrl) {
+      pushCycleToGoogleSheets(currentSettings.googleSheetWebhookUrl, newCycle);
+    }
   };
 
   // Save new transaction + silent sync to Google Sheet
@@ -111,22 +144,26 @@ export function App() {
 
     await db.transactions.add(newTx);
 
-    // ถ้ามีการตั้งค่า Google Sheets Webhook URL ให้ยิง sync เงียบๆ ทันที
+    // ยิงรายการขึ้น Google Sheets
     const currentSettings = await db.settings.get('default');
     if (currentSettings?.googleSheetWebhookUrl) {
-      try {
-        fetch(currentSettings.googleSheetWebhookUrl, {
-          method: 'POST',
-          mode: 'no-cors',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(newTx)
-        }).then(() => {
-          db.transactions.update(newTx.id, { synced: true });
-        }).catch(() => {});
-      } catch (e) {
-        // ออฟไลน์ ทำงานปกติ ข้อมูลอยู่ใน IndexedDB ปลอดภัย
-      }
+      pushTransactionToGoogleSheets(currentSettings.googleSheetWebhookUrl, newTx);
     }
+  };
+
+  // Manual sync button
+  const handleManualSync = async () => {
+    const currentSettings = await db.settings.get('default');
+    if (!currentSettings?.googleSheetWebhookUrl) {
+      alert('กรุณาใส่ลิงก์ Google Sheets Webhook ในเมนูตั้งค่า ⚙️ ก่อนครับ');
+      setIsSettingsOpen(true);
+      return;
+    }
+
+    setIsSyncing(true);
+    const res = await syncFromGoogleSheets(currentSettings.googleSheetWebhookUrl);
+    setIsSyncing(false);
+    alert(res.message);
   };
 
   // Delete transaction
@@ -137,16 +174,23 @@ export function App() {
   // Save Webhook URL
   const handleSaveWebhookUrl = async (url: string) => {
     await db.settings.update('default', { googleSheetWebhookUrl: url });
+    // ทดลองดึงข้อมูลทันทีหลังบันทึก
+    if (url) {
+      setIsSyncing(true);
+      syncFromGoogleSheets(url).finally(() => setIsSyncing(false));
+    }
   };
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col justify-between">
-      {/* 1. ส่วนหัวเลือกสมาชิกในครอบครัว */}
+      {/* 1. ส่วนหัวเลือกสมาชิกในครอบครัว & ปุ่มซิงค์ */}
       <FamilyBar
         activeMemberId={activeMemberId}
+        isSyncing={isSyncing}
         onSelectMember={handleSelectMember}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenUnitConverter={() => setIsConverterOpen(true)}
+        onSync={handleManualSync}
       />
 
       {/* Main Container */}
@@ -216,7 +260,7 @@ export function App() {
 
       {/* Footer ข้อมูลระบบ */}
       <footer className="text-center py-3 text-[11px] text-slate-400 border-t border-slate-200 bg-white">
-        🌾 บัญชีฟาร์มครอบครัว • บันทึกในเครื่อง 100% แม้ไม่มีเน็ต
+        🌾 บัญชีฟาร์มครอบครัว • บันทึกในเครื่อง 100% ซิงค์ข้ามเครื่องได้
       </footer>
 
       {/* Modals */}
@@ -240,6 +284,7 @@ export function App() {
         onClose={() => setIsSettingsOpen(false)}
         googleSheetWebhookUrl={settings?.googleSheetWebhookUrl}
         onSaveWebhookUrl={handleSaveWebhookUrl}
+        onSyncComplete={() => {}}
       />
 
       <AddCycleModal
@@ -252,4 +297,3 @@ export function App() {
 }
 
 export default App;
-
