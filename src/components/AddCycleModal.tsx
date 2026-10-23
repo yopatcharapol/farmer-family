@@ -126,7 +126,7 @@ export const AddCycleModal: React.FC<AddCycleModalProps> = ({
 
         <form onSubmit={handleSubmit} className="p-4 space-y-3.5 text-xs max-h-[85vh] overflow-y-auto">
           
-          {/* 1. เลือกชนิดพืช (ยางพารา, ผักกาด, ข้าว, ข้าวโพด, มันสำปะหลัง, อ้อย) */}
+          {/* 1. เลือกชนิดพืช (ยางพารา, ผักกาด, ข้าว, ข้าวโพด, มันสำปะหลัง) */}
           <div>
             <label className="font-bold text-slate-800 text-sm block mb-1.5">
               1. เลือกชนิดพืชที่ปลูก <span className="text-rose-500">*</span>

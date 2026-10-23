@@ -55,16 +55,6 @@ export const CROP_CONFIGS: Record<string, CropTypeConfig> = {
     defaultPricePerKg: 3.2,
     unitName: 'ตัน'
   },
-  'อ้อย': {
-    id: 'อ้อย',
-    name: '🎋 อ้อยโรงงาน',
-    icon: '🎋',
-    daysToHarvest: 365, // 1 ปี (12 เดือน)
-    durationLabel: '1 ปี (12 เดือน / 365 วัน)',
-    defaultYieldKgPerRai: 12000,
-    defaultPricePerKg: 1.2,
-    unitName: 'ตัน'
-  },
   'ยางพารา': {
     id: 'ยางพารา',
     name: '🌲 ยางพารา (รอบกรีดเก็บผลผลิต)',

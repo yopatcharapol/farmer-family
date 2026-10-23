@@ -37,7 +37,7 @@ export type TransactionType = 'expense' | 'income';
 export interface CropCycle {
   id: string;                  // UUID
   name: string;                // เช่น "ข้าวหอมมะลิ 69 (แปลงดอนตา)"
-  cropType: string;            // ข้าว, ข้าวโพด, มันสำปะหลัง, อ้อย, ยางพารา, ผักกาด
+  cropType: string;            // ข้าว, ข้าวโพด, มันสำปะหลัง, ยางพารา, ผักกาด
   areaRai: number;             // ไร่
   areaNgan: number;            // งาน
   areaSqWa: number;            // ตารางวา
