@@ -77,22 +77,25 @@ export function App() {
   // Selected current cycle
   const currentCycle = cycles.find((c) => c.id === activeCycleId) || cycles[0];
 
-  // Auto-set activeCycleId if not set
+  // Auto-set activeCycleId if not set or invalid
   useEffect(() => {
-    if (!activeCycleId && cycles.length > 0) {
-      setActiveCycleId(cycles[0].id);
+    if (cycles.length > 0) {
+      if (!activeCycleId || !cycles.some((c) => c.id === activeCycleId)) {
+        setActiveCycleId(cycles[0].id);
+      }
     }
   }, [cycles, activeCycleId]);
 
   // Transactions for current cycle
   const transactions = useLiveQuery(
-    () => {
-      if (!currentCycle) return [];
-      return db.transactions
-        .where('cycleId')
-        .equals(currentCycle.id)
-        .reverse()
-        .sortBy('createdAt');
+    async () => {
+      const allTx = await db.transactions.toArray();
+      if (!currentCycle) {
+        return allTx.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      }
+      return allTx
+        .filter((t) => !t.cycleId || t.cycleId === 'default' || t.cycleId === currentCycle.id)
+        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     },
     [currentCycle?.id]
   ) || [];

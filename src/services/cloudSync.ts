@@ -1,5 +1,6 @@
 import { db } from '../db/db';
 import { Transaction, CropCycle } from '../types';
+import { getTodayIso } from '../utils/thaiAgUnits';
 
 /**
  * บริการซิงค์ข้อมูลสองทางกับ Google Sheets (Two-Way Cloud Sync)
@@ -8,14 +9,29 @@ import { Transaction, CropCycle } from '../types';
 
 export const DEFAULT_WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycbyL_T7Us7Irx9FI0eP_XjwPv6tDSdmx4zPHZGOFVq2RWocVJT_m-upr_dmijpYSemGHmQ/exec';
 
-// 1. ดึงข้อมูลล่าสุดจาก Google Sheets ลงมาที่เครื่อง
+// แปลงรูปแบบวันที่เป็น YYYY-MM-DD เสมอ
+function toIsoDate(val: any): string {
+  if (!val) return getTodayIso();
+  if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(val.trim())) {
+    return val.trim();
+  }
+  const d = new Date(val);
+  if (isNaN(d.getTime())) return getTodayIso();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+// 1. ดึงข้อมูลล่าสุดจาก Google Sheets ลงมาที่เครื่อง (และส่งแปลงในเครื่องที่ยังไม่มีขึ้นไป)
 export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ success: boolean; message: string; count: number }> {
-  if (!webhookUrl || !webhookUrl.startsWith('http')) {
+  const targetUrl = webhookUrl || DEFAULT_WEBHOOK_URL;
+  if (!targetUrl || !targetUrl.startsWith('http')) {
     return { success: false, message: 'ยังไม่ได้ตั้งค่าลิงก์ Google Sheets Webhook', count: 0 };
   }
 
   try {
-    const response = await fetch(webhookUrl, {
+    const response = await fetch(targetUrl, {
       method: 'GET',
       headers: {
         'Accept': 'application/json'
@@ -30,42 +46,75 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
 
     let newTxCount = 0;
 
-    // ซิงค์แปลงเพาะปลูก (Cycles)
+    // 1.1 ซิงค์แปลงเพาะปลูก (Cycles) จาก Google Sheets ลงเครื่อง
     if (data.cycles && Array.isArray(data.cycles) && data.cycles.length > 0) {
       for (const c of data.cycles) {
         if (!c.id) continue;
-        const exists = await db.cycles.get(c.id);
-        if (!exists) {
-          await db.cycles.add(c);
-        }
+        const normalizedCycle: CropCycle = {
+          id: String(c.id),
+          name: String(c.name || 'แปลงเพาะปลูก'),
+          cropType: String(c.cropType || 'ผักกาด'),
+          totalAreaRai: Number(c.totalAreaRai) || 0.5,
+          areaRai: Number(c.areaRai) || 0,
+          areaNgan: Number(c.areaNgan) || 0,
+          areaSqWa: Number(c.areaSqWa) || 0,
+          startDate: toIsoDate(c.startDate),
+          expectedHarvestDate: toIsoDate(c.expectedHarvestDate),
+          expectedYieldKg: Number(c.expectedYieldKg) || 0,
+          targetPricePerKg: Number(c.targetPricePerKg) || 0,
+          status: 'active',
+          createdAt: Number(c.createdAt) || Date.now()
+        };
+        await db.cycles.put(normalizedCycle);
       }
     }
 
-    // ซิงค์รายการบันทึก (Transactions)
+    // 1.2 ซิงค์รายการบันทึก (Transactions) จาก Google Sheets ลงเครื่อง
     if (data.transactions && Array.isArray(data.transactions) && data.transactions.length > 0) {
       for (const t of data.transactions) {
-        if (!t.id) continue;
-        const exists = await db.transactions.get(t.id);
-        if (!exists) {
-          await db.transactions.add({
-            ...t,
-            synced: true
-          });
-          newTxCount++;
-        }
+        if (!t.id && !t.title) continue;
+        const txId = String(t.id || `tx-${Date.now()}-${Math.random()}`);
+        const normalizedTx: Transaction = {
+          id: txId,
+          cycleId: String(t.cycleId || 'default'),
+          type: String(t.type).trim() === 'income' ? 'income' : 'expense',
+          category: (t.category as any) || (t.type === 'income' ? 'main_crop' : 'labor'),
+          categoryLabel: String(t.categoryLabel || 'ทั่วไป'),
+          title: String(t.title || 'รายการ'),
+          amount: Number(t.amount) || 0,
+          quantity: Number(t.quantity) || 1,
+          unit: String(t.unit || ''),
+          unitPrice: Number(t.unitPrice) || 0,
+          recordedBy: (t.recordedBy as any) || 'me',
+          date: toIsoDate(t.date),
+          notes: String(t.notes || ''),
+          synced: true,
+          createdAt: Number(t.createdAt) || Date.now()
+        };
+        await db.transactions.put(normalizedTx);
+        newTxCount++;
+      }
+    }
+
+    // 1.3 ส่งแปลงในเครื่องที่ Google Sheets ยังไม่มีขึ้นไปอัตโนมัติ (Reconciliation)
+    const localCycles = await db.cycles.toArray();
+    for (const lc of localCycles) {
+      const remoteHas = data.cycles?.some((rc: any) => rc.id === lc.id);
+      if (!remoteHas) {
+        await pushCycleToGoogleSheets(targetUrl, lc);
       }
     }
 
     return {
       success: true,
-      message: `ซิงค์สำเร็จ! อัปเดต ${newTxCount} รายการใหม่`,
+      message: `ซิงค์สำเร็จ! ข้อมูลตรงกันแล้ว (${newTxCount} รายการ)`,
       count: newTxCount
     };
   } catch (err: any) {
     console.error('Sync Error:', err);
     return {
       success: false,
-      message: 'ไม่สามารถดึงข้อมูลจาก Google Sheet ได้ ตรวจสอบสิทธิ์การเข้าถึงเป็น "ทุกคน (Anyone)"',
+      message: 'ไม่สามารถดึงข้อมูลจาก Google Sheet ได้ กรุณาตรวจสอบอินเทอร์เน็ต',
       count: 0
     };
   }
@@ -73,12 +122,13 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
 
 // 2. ส่ง Transaction ขึ้น Google Sheets
 export async function pushTransactionToGoogleSheets(webhookUrl: string, transaction: Transaction) {
-  if (!webhookUrl) return;
+  const targetUrl = webhookUrl || DEFAULT_WEBHOOK_URL;
+  if (!targetUrl) return;
   try {
-    await fetch(webhookUrl, {
+    await fetch(targetUrl, {
       method: 'POST',
       mode: 'no-cors',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({
         action: 'add_transaction',
         ...transaction
@@ -91,12 +141,13 @@ export async function pushTransactionToGoogleSheets(webhookUrl: string, transact
 
 // 3. ส่งแปลงปลูก (Cycle) ขึ้น Google Sheets
 export async function pushCycleToGoogleSheets(webhookUrl: string, cycle: CropCycle) {
-  if (!webhookUrl) return;
+  const targetUrl = webhookUrl || DEFAULT_WEBHOOK_URL;
+  if (!targetUrl) return;
   try {
-    await fetch(webhookUrl, {
+    await fetch(targetUrl, {
       method: 'POST',
       mode: 'no-cors',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({
         action: 'add_cycle',
         ...cycle
@@ -107,7 +158,7 @@ export async function pushCycleToGoogleSheets(webhookUrl: string, cycle: CropCyc
   }
 }
 
-// 4. สคริปต์ Google Apps Script ฉบับสมบูรณ์ที่รองรับทั้ง GET และ POST
+// 4. สคริปต์ Google Apps Script ฉบับสมบูรณ์
 export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("รายการ") || ss.getActiveSheet();
@@ -135,7 +186,7 @@ export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
     }
   }
 
-  // แปลงเพาะปลูก
+  // ดึงแปลงเพาะปลูก
   var cycleSheet = ss.getSheetByName("แปลงปลูก");
   var cycles = [];
   if (cycleSheet) {
@@ -182,17 +233,10 @@ function doPost(e) {
       cycleSheet.appendRow(["รหัสแปลง (ID)", "ชื่อแปลง", "ชนิดพืช", "ไร่รวม", "ไร่", "งาน", "วา", "วันเริ่มปลูก", "วันคาดเก็บเกี่ยว", "ผลผลิตคาดการณ์", "ราคาเป้าหมาย"]);
     }
     cycleSheet.appendRow([
-      data.id,
-      data.name,
-      data.cropType,
-      data.totalAreaRai,
-      data.areaRai,
-      data.areaNgan,
-      data.areaSqWa,
-      data.startDate,
-      data.expectedHarvestDate,
-      data.expectedYieldKg,
-      data.targetPricePerKg
+      data.id, data.name, data.cropType, data.totalAreaRai,
+      data.areaRai, data.areaNgan, data.areaSqWa,
+      data.startDate, data.expectedHarvestDate,
+      data.expectedYieldKg, data.targetPricePerKg
     ]);
   } else {
     var sheet = ss.getSheetByName("รายการ") || ss.getActiveSheet();
@@ -234,4 +278,3 @@ function formatDateIso(val) {
   }
   return String(val);
 }`;
-
