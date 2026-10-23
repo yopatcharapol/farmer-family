@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { X, Download, Upload, Cloud, Copy, Check, ExternalLink } from 'lucide-react';
-import { db } from '../db/db';
+import { X, Download, Upload, Cloud, Copy, Check, Trash2 } from 'lucide-react';
+import { db, clearAllData } from '../db/db';
 
 interface SyncBackupModalProps {
   isOpen: boolean;
@@ -225,6 +225,30 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({
                 {gasSampleCode}
               </pre>
             </div>
+          </div>
+
+          {/* หมวดที่ 3: ล้างข้อมูลทั้งหมดในเครื่อง (เริ่มต้นใหม่เป็น 0) */}
+          <div className="bg-rose-50 border border-rose-200 rounded-2xl p-3.5 space-y-2">
+            <h3 className="font-bold text-rose-800 text-sm flex items-center gap-1.5">
+              <Trash2 className="w-4 h-4 text-rose-600" />
+              ล้างข้อมูลในเครื่องให้เป็น 0 (เริ่มต้นใหม่)
+            </h3>
+            <p className="text-rose-600 text-[11px]">
+              ใช้เมื่อต้องการลบแปลงและรายการบันทึกทั้งหมดออก เพื่อเริ่มจดบันทึกของจริง
+            </p>
+            <button
+              onClick={async () => {
+                if (confirm('⚠️ ยืนยันการล้างข้อมูลทั้งหมดในเครื่องให้เป็น 0 หรือไม่?\n\n(แปลงและรายการบันทึกทั้งหมดจะถูกลบออกเพื่อเริ่มต้นใหม่)')) {
+                  await clearAllData();
+                  alert('✅ ล้างข้อมูลในเครื่องเรียบร้อยแล้ว');
+                  window.location.reload();
+                }
+              }}
+              className="w-full py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 shadow-sm btn-touch-active text-xs"
+            >
+              <Trash2 className="w-4 h-4" />
+              <span>ล้างข้อมูลทั้งหมดในเครื่องเป็น 0</span>
+            </button>
           </div>
 
           <button

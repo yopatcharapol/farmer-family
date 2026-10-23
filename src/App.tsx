@@ -172,10 +172,20 @@ export function App() {
         {/* 4. สองปุ่มยักษ์ บันทึกรายจ่าย / รายรับ */}
         <ActionButtons
           onOpenExpense={() => {
+            if (!currentCycle) {
+              alert('กรุณาสร้างแปลงเพาะปลูกแรกก่อนเริ่มบันทึกรายการครับ');
+              setIsAddCycleOpen(true);
+              return;
+            }
             setEntryType('expense');
             setIsEntryModalOpen(true);
           }}
           onOpenIncome={() => {
+            if (!currentCycle) {
+              alert('กรุณาสร้างแปลงเพาะปลูกแรกก่อนเริ่มบันทึกรายการครับ');
+              setIsAddCycleOpen(true);
+              return;
+            }
             setEntryType('income');
             setIsEntryModalOpen(true);
           }}
