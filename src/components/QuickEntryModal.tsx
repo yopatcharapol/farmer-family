@@ -300,3 +300,4 @@ export const QuickEntryModal: React.FC<QuickEntryModalProps> = ({
     </div>
   );
 };
+

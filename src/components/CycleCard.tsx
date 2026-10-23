@@ -79,3 +79,4 @@ export const CycleCard: React.FC<CycleCardProps> = ({
     </div>
   );
 };
+

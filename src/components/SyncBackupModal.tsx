@@ -238,3 +238,4 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({
     </div>
   );
 };
+

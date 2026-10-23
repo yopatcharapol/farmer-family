@@ -105,3 +105,4 @@ export const BreakEvenSimulator: React.FC<BreakEvenSimulatorProps> = ({
     </div>
   );
 };
+
