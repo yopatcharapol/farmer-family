@@ -37,6 +37,8 @@ export const InAppKeypad: React.FC<InAppKeypadProps> = ({
   confirmLabel = '✅ บันทึกรายการทันที',
   isIncome = false
 }) => {
+  const [isSubmitting, setIsSubmitting] = React.useState(false);
+
   const handleDigit = (digit: string) => {
     playFeedback();
     if (value === '0' && digit !== '.') {
@@ -136,16 +138,19 @@ export const InAppKeypad: React.FC<InAppKeypadProps> = ({
         </button>
       </div>
 
-      {/* ปุ่มยืนยันขนาดใหญ่พิเศษ */}
+      {/* ปุ่มยืนยันขนาดใหญ่พิเศษ (มี Debounce ป้องกันการกดเบิ้ล 2 ครั้ง) */}
       <button
         type="button"
-        disabled={numVal <= 0}
+        disabled={numVal <= 0 || isSubmitting}
         onClick={() => {
+          if (isSubmitting || numVal <= 0) return;
+          setIsSubmitting(true);
           playFeedback();
           onConfirm();
+          setTimeout(() => setIsSubmitting(false), 700);
         }}
-        className={`w-full h-15 rounded-2xl text-lg font-black text-white shadow-lg flex items-center justify-center gap-2 btn-touch-active transition-all ${
-          numVal > 0
+        className={`w-full min-h-[58px] rounded-2xl text-lg font-black text-white shadow-lg flex items-center justify-center gap-2 btn-touch-active transition-all ${
+          numVal > 0 && !isSubmitting
             ? isIncome
               ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-600/30 active:scale-98'
               : 'bg-rose-600 hover:bg-rose-500 shadow-rose-600/30 active:scale-98'
@@ -153,7 +158,7 @@ export const InAppKeypad: React.FC<InAppKeypadProps> = ({
         }`}
       >
         <Check className="w-6 h-6" />
-        <span>{confirmLabel}</span>
+        <span>{isSubmitting ? 'กำลังบันทึก...' : confirmLabel}</span>
       </button>
     </div>
   );

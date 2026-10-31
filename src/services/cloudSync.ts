@@ -4,7 +4,7 @@ import { getTodayIso } from '../utils/thaiAgUnits';
 
 /**
  * บริการซิงค์ข้อมูลสองทางกับ Google Sheets (Two-Way Cloud Sync)
- * ช่วยให้อุปกรณ์ของ พ่อ, แม่, พี่, และเรา มีข้อมูลตรงกัน 100%
+ * รองรับการ เพิ่ม (INSERT), แก้ไข (UPDATE), และ ลบ (DELETE)
  */
 
 export const DEFAULT_WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycbyL_T7Us7Irx9FI0eP_XjwPv6tDSdmx4zPHZGOFVq2RWocVJT_m-upr_dmijpYSemGHmQ/exec';
@@ -43,19 +43,11 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
     }
 
     const data = await response.json();
-
     let newTxCount = 0;
-
-    // ล้างแปลงที่มีชื่อเสีย (????) ที่อาจตกค้างในเครื่องออก
-    const badCycles = await db.cycles.filter(c => c.name.includes('?')).toArray();
-    for (const b of badCycles) {
-      await db.cycles.delete(b.id);
-    }
 
     // 1.1 ซิงค์แปลงเพาะปลูก (Cycles) จาก Google Sheets ลงเครื่อง
     let primaryCycleId = '';
     if (data.cycles && Array.isArray(data.cycles) && data.cycles.length > 0) {
-      // คัดเลือกแปลงที่ชื่อภาษาไทยสมบูรณ์ก่อน (ไม่เอา ????)
       const cleanCycles = data.cycles.filter((c: any) => c.name && !c.name.includes('?'));
       const listToSync = cleanCycles.length > 0 ? cleanCycles : data.cycles;
 
@@ -64,7 +56,6 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
         let cName = String(c.name || 'แปลงเพาะปลูก');
         let cCrop = String(c.cropType || 'ผักกาด');
         
-        // ถ้าชื่อเพี้ยนเป็น ???? ให้แปลงเป็นชื่อที่ถูกต้อง
         if (cName.includes('?')) {
           cName = 'แปลง - ผักกาด (26/10/2569)';
           cCrop = 'ผักกาด';
@@ -82,17 +73,20 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
           expectedHarvestDate: toIsoDate(c.expectedHarvestDate),
           expectedYieldKg: Number(c.expectedYieldKg) || 1250,
           targetPricePerKg: Number(c.targetPricePerKg) || 15,
-          status: 'active',
-          createdAt: Number(c.createdAt) || Date.now()
+          status: c.status === 'closed' ? 'closed' : 'active',
+          finalProfit: c.finalProfit !== undefined ? Number(c.finalProfit) : undefined,
+          createdAt: Number(c.createdAt) || Date.now(),
+          updatedAt: Number(c.updatedAt) || Date.now()
         };
         await db.cycles.put(normalizedCycle);
-        if (!primaryCycleId) primaryCycleId = normalizedCycle.id;
+        if (!primaryCycleId && normalizedCycle.status === 'active') {
+          primaryCycleId = normalizedCycle.id;
+        }
       }
     }
 
-    // หากยังไม่มีแปลง ให้ดึงแปลงแรกในเครื่องมาอ้างอิง
     if (!primaryCycleId) {
-      const firstCycle = await db.cycles.toCollection().first();
+      const firstCycle = await db.cycles.where('status').equals('active').first();
       if (firstCycle) primaryCycleId = firstCycle.id;
     }
 
@@ -102,7 +96,13 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
         if (!t.id && !t.title) continue;
         const txId = String(t.id || `tx-${Date.now()}-${Math.random()}`);
         
-        // ผูกรายการเข้ากับแปลงปัจจุบัน (แก้ปัญหา cycleId เป็น default แล้วไม่ขึ้นโชว์)
+        // ตรวจสอบว่าในเครื่องมีรายการนี้ที่ติด pending_update / pending_delete หรือไม่
+        const localTx = await db.transactions.get(txId);
+        if (localTx && (localTx.syncStatus === 'pending_update' || localTx.syncStatus === 'pending_delete')) {
+          // อย่าเขียนทับการเปลี่ยนแปลงที่ยังค้างส่งในเครื่อง
+          continue;
+        }
+
         let txCycleId = String(t.cycleId || 'default');
         if (txCycleId === 'default' && primaryCycleId) {
           txCycleId = primaryCycleId;
@@ -119,11 +119,18 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
           quantity: Number(t.quantity) || 1,
           unit: String(t.unit || ''),
           unitPrice: Number(t.unitPrice) || 0,
-          recordedBy: (t.recordedBy as any) || 'me',
+          recordedBy: String(t.recordedBy || 'me'),
+          paidBy: String(t.paidBy || t.recordedBy || 'dad'),
+          paymentStatus: t.paymentStatus === 'credit' ? 'credit' : 'paid',
+          creditorName: t.creditorName ? String(t.creditorName) : undefined,
           date: toIsoDate(t.date),
           notes: String(t.notes || ''),
+          harvestWeight: t.harvestWeight ? Number(t.harvestWeight) : undefined,
           synced: true,
-          createdAt: Number(t.createdAt) || Date.now()
+          syncStatus: 'synced',
+          isDeleted: false,
+          createdAt: Number(t.createdAt) || Date.now(),
+          updatedAt: Number(t.updatedAt) || Date.now()
         };
         await db.transactions.put(normalizedTx);
         newTxCount++;
@@ -135,16 +142,6 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
       await db.transactions.where('cycleId').equals('default').modify({ cycleId: primaryCycleId });
     }
 
-    // 1.3 ส่งแปลงในเครื่องที่ Google Sheets ยังไม่มีขึ้นไปอัตโนมัติ
-    const localCycles = await db.cycles.toArray();
-    for (const lc of localCycles) {
-      if (lc.name.includes('?')) continue;
-      const remoteHas = data.cycles?.some((rc: any) => rc.id === lc.id && !rc.name.includes('?'));
-      if (!remoteHas) {
-        await pushCycleToGoogleSheets(targetUrl, lc);
-      }
-    }
-
     return {
       success: true,
       message: `ซิงค์สำเร็จ! อัปเดตข้อมูลตรงกันเรียบร้อย (${newTxCount} รายการ)`,
@@ -154,16 +151,22 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
     console.error('Sync Error:', err);
     return {
       success: false,
-      message: 'ไม่สามารถดึงข้อมูลจาก Google Sheet ได้ กรุณาตรวจสอบอินเทอร์เน็ต',
+      message: 'ไม่สามารถดึงข้อมูลจาก Google Sheet ได้ กรุณาตรวจสอบสัญญาณเน็ต',
       count: 0
     };
   }
 }
 
-// 2. ส่ง Transaction ขึ้น Google Sheets
-export async function pushTransactionToGoogleSheets(webhookUrl: string, transaction: Transaction) {
+// 2. ส่ง Transaction เดี่ยว (INSERT)
+export async function pushTransactionToGoogleSheets(webhookUrl: string, transaction: Transaction): Promise<boolean> {
   const targetUrl = webhookUrl || DEFAULT_WEBHOOK_URL;
-  if (!targetUrl) return;
+  if (!targetUrl) return false;
+
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    await db.transactions.update(transaction.id, { syncStatus: 'pending' });
+    return false;
+  }
+
   try {
     await fetch(targetUrl, {
       method: 'POST',
@@ -174,9 +177,177 @@ export async function pushTransactionToGoogleSheets(webhookUrl: string, transact
         ...transaction
       })
     });
+
+    await db.transactions.update(transaction.id, {
+      syncStatus: 'synced',
+      synced: true
+    });
+    return true;
   } catch (e) {
-    console.warn('Silent push failed (offline):', e);
+    console.warn('Push transaction failed (will retry):', e);
+    await db.transactions.update(transaction.id, { syncStatus: 'failed' });
+    return false;
   }
+}
+
+// 2.1 ส่งคำสั่งแก้ไขรายการ (UPDATE)
+export async function updateTransactionInGoogleSheets(webhookUrl: string, transaction: Transaction): Promise<boolean> {
+  const targetUrl = webhookUrl || DEFAULT_WEBHOOK_URL;
+  if (!targetUrl) return false;
+
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    await db.transactions.update(transaction.id, { syncStatus: 'pending_update' });
+    return false;
+  }
+
+  try {
+    await fetch(targetUrl, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'update_transaction',
+        ...transaction
+      })
+    });
+
+    await db.transactions.update(transaction.id, {
+      syncStatus: 'synced',
+      synced: true
+    });
+    return true;
+  } catch (e) {
+    console.warn('Update transaction in sheets failed:', e);
+    await db.transactions.update(transaction.id, { syncStatus: 'pending_update' });
+    return false;
+  }
+}
+
+// 2.2 ส่งคำสั่งลบรายการ (DELETE)
+export async function deleteTransactionFromGoogleSheets(webhookUrl: string, transactionId: string): Promise<boolean> {
+  const targetUrl = webhookUrl || DEFAULT_WEBHOOK_URL;
+  if (!targetUrl) return false;
+
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    // ออฟไลน์: มาร์กไว้ว่า pending_delete เพื่อส่งลบภายหลัง
+    await db.transactions.update(transactionId, {
+      isDeleted: true,
+      syncStatus: 'pending_delete'
+    });
+    return false;
+  }
+
+  try {
+    await fetch(targetUrl, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'delete_transaction',
+        id: transactionId
+      })
+    });
+
+    // ส่งลบสำเร็จแล้ว ลบออกจากฐานข้อมูล IndexedDB ในเครื่องอย่างถาวร
+    await db.transactions.delete(transactionId);
+    return true;
+  } catch (e) {
+    console.warn('Delete transaction from sheets failed:', e);
+    await db.transactions.update(transactionId, {
+      isDeleted: true,
+      syncStatus: 'pending_delete'
+    });
+    return false;
+  }
+}
+
+// 2.3 ประมวลผลคิวรอส่งข้อมูล (Flush Offline Sync Queue: Add, Update, Delete)
+export async function syncPendingQueue(webhookUrl: string): Promise<{ syncedCount: number; failedCount: number; message: string }> {
+  const targetUrl = webhookUrl || DEFAULT_WEBHOOK_URL;
+  if (!targetUrl) {
+    return { syncedCount: 0, failedCount: 0, message: 'ยังไม่ได้ระบุลิงก์ Webhook' };
+  }
+
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return { syncedCount: 0, failedCount: 0, message: 'ไม่มีสัญญาณเน็ต กำลังรอเชื่อมต่อ...' };
+  }
+
+  let syncedCount = 0;
+
+  // 1. ส่งรายการที่รอการลบ (pending_delete)
+  const pendingDeletes = await db.transactions
+    .filter(t => t.syncStatus === 'pending_delete' || t.isDeleted === true)
+    .toArray();
+
+  for (const delTx of pendingDeletes) {
+    try {
+      await fetch(targetUrl, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: 'delete_transaction', id: delTx.id })
+      });
+      await db.transactions.delete(delTx.id);
+      syncedCount++;
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 2. ส่งรายการที่รอการแก้ไข (pending_update)
+  const pendingUpdates = await db.transactions
+    .filter(t => t.syncStatus === 'pending_update' && !t.isDeleted)
+    .toArray();
+
+  for (const updTx of pendingUpdates) {
+    try {
+      await fetch(targetUrl, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: 'update_transaction', ...updTx })
+      });
+      await db.transactions.update(updTx.id, { syncStatus: 'synced', synced: true });
+      syncedCount++;
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // 3. ส่งรายการใหม่ที่ค้างส่ง (pending หรือ failed)
+  const pendingAdds = await db.transactions
+    .filter(t => (t.syncStatus === 'pending' || t.syncStatus === 'failed' || !t.synced) && !t.isDeleted)
+    .toArray();
+
+  if (pendingAdds.length > 0) {
+    try {
+      await fetch(targetUrl, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: 'batch_sync', transactions: pendingAdds })
+      });
+      const addIds = pendingAdds.map(t => t.id);
+      await db.transactions.where('id').anyOf(addIds).modify({ syncStatus: 'synced', synced: true });
+      syncedCount += pendingAdds.length;
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  if (syncedCount > 0) {
+    return {
+      syncedCount,
+      failedCount: 0,
+      message: `ซิงค์คิวสำเร็จ! ส่งข้อมูลเข้า Google Sheets แล้ว ${syncedCount} รายการ`
+    };
+  }
+
+  return {
+    syncedCount: 0,
+    failedCount: 0,
+    message: 'ไม่มีข้อมูลค้างส่ง ข้อมูลเป็นปัจจุบันแล้ว'
+  };
 }
 
 // 3. ส่งแปลงปลูก (Cycle) ขึ้น Google Sheets
@@ -198,7 +369,7 @@ export async function pushCycleToGoogleSheets(webhookUrl: string, cycle: CropCyc
   }
 }
 
-// 4. สคริปต์ Google Apps Script ฉบับสมบูรณ์
+// 4. สคริปต์ Google Apps Script ฉบับสมบูรณ์ (รองรับ INSERT, UPDATE, DELETE, BATCH)
 export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("รายการ") || ss.getActiveSheet();
@@ -221,12 +392,16 @@ export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
         recordedBy: mapRecorder(r[8]),
         notes: String(r[9] || ''),
         cycleId: String(r[10] || 'default'),
+        paymentStatus: String(r[11] || 'paid'),
+        creditorName: String(r[12] || ''),
+        paidBy: mapRecorder(r[13] || r[8]),
+        harvestWeight: Number(r[14]) || 0,
         createdAt: new Date(r[0]).getTime() || (Date.now() - (rows.length - i) * 60000)
       });
     }
   }
 
-  // ดึงแปลงเพาะปลูก (ไม่เอาแถวที่ชื่อเพี้ยน ????)
+  // ดึงแปลงเพาะปลูก
   var cycleSheet = ss.getSheetByName("แปลงปลูก");
   var cycles = [];
   if (cycleSheet) {
@@ -235,7 +410,7 @@ export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
       var cr = cRows[j];
       if (!cr[0]) continue;
       var cName = String(cr[1] || '');
-      if (cName.indexOf('?') !== -1) continue; // ข้ามแถวที่ชื่อเพี้ยน
+      if (cName.indexOf('?') !== -1) continue;
       cycles.push({
         id: String(cr[0]),
         name: cName,
@@ -248,7 +423,8 @@ export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
         expectedHarvestDate: cr[8] ? formatDateIso(cr[8]) : '',
         expectedYieldKg: Number(cr[9]) || 0,
         targetPricePerKg: Number(cr[10]) || 0,
-        status: 'active',
+        status: String(cr[11] || 'active'),
+        finalProfit: Number(cr[12]) || 0,
         createdAt: Date.now()
       });
     }
@@ -267,48 +443,144 @@ export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
 function doPost(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var data = JSON.parse(e.postData.contents);
-  
-  if (data.action === 'add_cycle') {
+  var action = data.action;
+
+  // 1. จัดการแปลงปลูก (Cycle)
+  if (action === 'add_cycle' || action === 'update_cycle') {
     var cycleSheet = ss.getSheetByName("แปลงปลูก");
     if (!cycleSheet) {
       cycleSheet = ss.insertSheet("แปลงปลูก");
-      cycleSheet.appendRow(["รหัสแปลง (ID)", "ชื่อแปลง", "ชนิดพืช", "ไร่รวม", "ไร่", "งาน", "วา", "วันเริ่มปลูก", "วันคาดเก็บเกี่ยว", "ผลผลิตคาดการณ์", "ราคาเป้าหมาย"]);
+      cycleSheet.appendRow(["รหัสแปลง (ID)", "ชื่อแปลง", "ชนิดพืช", "ไร่รวม", "ไร่", "งาน", "วา", "วันเริ่มปลูก", "วันคาดเก็บเกี่ยว", "ผลผลิตคาดการณ์", "ราคาเป้าหมาย", "สถานะ", "กำไรสุทธิ"]);
     }
-    cycleSheet.appendRow([
-      data.id, data.name, data.cropType, data.totalAreaRai,
-      data.areaRai, data.areaNgan, data.areaSqWa,
+    var rowIdx = findRowById(cycleSheet, data.id);
+    var cycleRow = [
+      data.id, data.name, data.cropType, Number(data.totalAreaRai) || 0,
+      Number(data.areaRai) || 0, Number(data.areaNgan) || 0, Number(data.areaSqWa) || 0,
       data.startDate, data.expectedHarvestDate,
-      data.expectedYieldKg, data.targetPricePerKg
-    ]);
-  } else {
-    var sheet = ss.getSheetByName("รายการ") || ss.getActiveSheet();
-    if (sheet.getLastRow() === 0) {
-      sheet.appendRow(["รหัสรายการ (ID)", "วันที่ทำรายการ", "ประเภท", "หมวดหมู่", "ชื่อรายการ", "ยอดเงิน (บาท)", "จำนวน", "หน่วย", "ผู้บันทึก", "หมายเหตุ", "รหัสแปลง"]);
+      Number(data.expectedYieldKg) || 0, Number(data.targetPricePerKg) || 0,
+      data.status || 'active', Number(data.finalProfit) || 0
+    ];
+    if (rowIdx > 0) {
+      cycleSheet.getRange(rowIdx, 1, 1, cycleRow.length).setValues([cycleRow]);
+    } else {
+      cycleSheet.appendRow(cycleRow);
     }
-    sheet.appendRow([
-      data.id || new Date().toISOString(),
-      data.date,
-      data.type === 'expense' ? 'รายจ่าย' : 'รายรับ',
-      data.categoryLabel,
-      data.title,
-      data.amount,
-      data.quantity || 1,
-      data.unit || '',
-      data.recordedBy === 'dad' ? 'พ่อ' : data.recordedBy === 'mom' ? 'แม่' : data.recordedBy === 'sibling' ? 'พี่' : 'เรา',
-      data.notes || '',
-      data.cycleId || ''
-    ]);
+    return ContentService.createTextOutput(JSON.stringify({result: 'success'})).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // 2. จัดการแผ่นงาน "รายการ" (Transactions)
+  var sheet = ss.getSheetByName("รายการ") || ss.getActiveSheet();
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(["รหัสรายการ (ID)", "วันที่", "ประเภท", "หมวดหมู่", "ชื่อรายการ", "ยอดเงิน", "จำนวน", "หน่วย", "ผู้บันทึก", "หมายเหตุ", "รหัสแปลง", "การจ่ายเงิน", "เจ้าหนี้/ร้านค้า", "คนควักเงิน", "น้ำหนักสุทธิ(กก)"]);
+  }
+
+  // 2.1 ลบรายการ (DELETE)
+  if (action === 'delete_transaction') {
+    var delRow = findRowById(sheet, data.id);
+    if (delRow > 0) {
+      sheet.deleteRow(delRow);
+    }
+    return ContentService.createTextOutput(JSON.stringify({result: 'success', action: 'deleted'})).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // 2.2 แก้ไขรายการ (UPDATE)
+  if (action === 'update_transaction') {
+    var updRow = findRowById(sheet, data.id);
+    var rowData = formatTxRow(data);
+    if (updRow > 0) {
+      sheet.getRange(updRow, 1, 1, rowData.length).setValues([rowData]);
+    } else {
+      sheet.appendRow(rowData);
+    }
+    return ContentService.createTextOutput(JSON.stringify({result: 'success', action: 'updated'})).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // 2.3 บันทึกแบบชุด (BATCH SYNC)
+  if (action === 'batch_sync' && Array.isArray(data.transactions)) {
+    var existingIds = getExistingIds(sheet);
+    var rowsToAppend = [];
+    for (var i = 0; i < data.transactions.length; i++) {
+      var t = data.transactions[i];
+      if (!t.id || existingIds[t.id]) continue;
+      existingIds[t.id] = true;
+      rowsToAppend.push(formatTxRow(t));
+    }
+    if (rowsToAppend.length > 0) {
+      sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
+    }
+    return ContentService.createTextOutput(JSON.stringify({result: 'success', added: rowsToAppend.length})).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // 2.4 บันทึกเดี่ยว (ADD)
+  var existRow = findRowById(sheet, data.id);
+  if (existRow > 0) {
+    sheet.getRange(existRow, 1, 1, formatTxRow(data).length).setValues([formatTxRow(data)]);
+  } else {
+    sheet.appendRow(formatTxRow(data));
   }
   
-  return ContentService.createTextOutput(JSON.stringify({result: 'success'}))
-    .setMimeType(ContentService.MimeType.JSON);
+  return ContentService.createTextOutput(JSON.stringify({result: 'success'})).setMimeType(ContentService.MimeType.JSON);
+}
+
+function formatTxRow(data) {
+  return [
+    data.id || ('tx-' + Date.now()),
+    data.date || '',
+    data.type === 'expense' ? 'รายจ่าย' : 'รายรับ',
+    data.categoryLabel || 'ทั่วไป',
+    data.title || 'รายการ',
+    Number(data.amount) || 0,
+    Number(data.quantity) || 1,
+    data.unit || '',
+    mapRecorderName(data.recordedBy),
+    data.notes || '',
+    data.cycleId || '',
+    data.paymentStatus === 'credit' ? 'เงินเชื่อ' : 'เงินสด',
+    data.creditorName || '',
+    mapRecorderName(data.paidBy || data.recordedBy),
+    Number(data.harvestWeight) || 0
+  ];
+}
+
+function findRowById(sheet, id) {
+  if (!id) return -1;
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return -1;
+  var values = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  for (var i = 0; i < values.length; i++) {
+    if (String(values[i][0]) === String(id)) {
+      return i + 2;
+    }
+  }
+  return -1;
+}
+
+function getExistingIds(sheet) {
+  var ids = {};
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    var values = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (var i = 0; i < values.length; i++) {
+      if (values[i][0]) ids[String(values[i][0])] = true;
+    }
+  }
+  return ids;
+}
+
+function mapRecorderName(val) {
+  if (val === 'dad') return 'พ่อ';
+  if (val === 'mom') return 'แม่';
+  if (val === 'sibling') return 'พี่';
+  if (val === 'me') return 'เรา';
+  return val || 'เรา';
 }
 
 function mapRecorder(val) {
   if (val === 'พ่อ') return 'dad';
   if (val === 'แม่') return 'mom';
   if (val === 'พี่') return 'sibling';
-  return 'me';
+  if (val === 'เรา') return 'me';
+  return val || 'me';
 }
 
 function formatDateIso(val) {

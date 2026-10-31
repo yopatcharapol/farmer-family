@@ -1,4 +1,4 @@
-import { ExpenseCategory, IncomeCategory } from '../types';
+import { ExpenseCategory, IncomeCategory, QuickTemplate } from '../types';
 
 export interface PresetItem {
   id: string;
@@ -217,3 +217,74 @@ export const PRESET_ITEMS: Record<string, PresetItem[]> = {
     { id: 'sub3', name: 'เงินชดเชยภัยพิบัติ/น้ำท่วม/แล้ง', category: 'subsidy', defaultUnit: 'รอบ', icon: '🤝' },
   ]
 };
+
+// รายการใช้บ่อยที่พ่อแม่แตะครั้งเดียวยอดวิ่งเข้าทันที (Quick Templates)
+export const QUICK_TEMPLATES: QuickTemplate[] = [
+  {
+    id: 'qt_diesel',
+    title: 'น้ำมันดีเซล (รถไถ/เครื่องสูบน้ำ)',
+    category: 'fuel',
+    categoryLabel: 'น้ำมัน/ไฟฟ้า',
+    type: 'expense',
+    defaultAmount: 500,
+    defaultUnit: 'ลิตร',
+    defaultQuantity: 15,
+    icon: '⛽'
+  },
+  {
+    id: 'qt_urea',
+    title: 'ปุ๋ย 46-0-0 (ยูเรีย)',
+    category: 'fertilizer',
+    categoryLabel: 'ปุ๋ย/บำรุงดิน',
+    type: 'expense',
+    defaultAmount: 850,
+    defaultUnit: 'กระสอบ',
+    defaultQuantity: 1,
+    icon: '🌾'
+  },
+  {
+    id: 'qt_16_16_16',
+    title: 'ปุ๋ยสูตร 16-16-16',
+    category: 'fertilizer',
+    categoryLabel: 'ปุ๋ย/บำรุงดิน',
+    type: 'expense',
+    defaultAmount: 950,
+    defaultUnit: 'กระสอบ',
+    defaultQuantity: 1,
+    icon: '🌾'
+  },
+  {
+    id: 'qt_plow',
+    title: 'จ้างรถไถดะ / ไถแปร',
+    category: 'machinery',
+    categoryLabel: 'รถจ้าง/เครื่องจักร',
+    type: 'expense',
+    defaultAmount: 250,
+    defaultUnit: 'ไร่',
+    defaultQuantity: 1,
+    icon: '🚜'
+  },
+  {
+    id: 'qt_labor',
+    title: 'ค่าแรงคนงานรายวัน',
+    category: 'labor',
+    categoryLabel: 'ค่าแรงคนงาน',
+    type: 'expense',
+    defaultAmount: 350,
+    defaultUnit: 'วัน',
+    defaultQuantity: 1,
+    icon: '👷‍♂️'
+  },
+  {
+    id: 'qt_chemical',
+    title: 'ยาคุมหญ้า / ฆ่าหญ้า',
+    category: 'chemical',
+    categoryLabel: 'ยา/ฮอร์โมน',
+    type: 'expense',
+    defaultAmount: 450,
+    defaultUnit: 'ขวด',
+    defaultQuantity: 1,
+    icon: '🧪'
+  }
+];
+

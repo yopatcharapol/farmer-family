@@ -1,3 +1,4 @@
+
 # 🌾 สมุดบัญชีฟาร์มครอบครัว (Family Farm Accounting PWA)
 
 เว็บแอปพลิเคชันบันทึกรายรับ-รายจ่ายและคำนวณต้นทุนการเกษตร ออกแบบเป็นพิเศษสำหรับ**คุณพ่อคุณแม่และครอบครัวเกษตรกรไทย**:
@@ -59,25 +60,91 @@ npm run dev
 
 1. เปิด **Google Drive** แล้วสร้าง **Google Sheet** เปล่า 1 ไฟล์
 2. เมนูด้านบนเลือก **ส่วนขยาย (Extensions) -> Apps Script**
-3. ลบโค้ดเดิมออกทั้งหมด แล้ววางโค้ดนี้:
+3. ลบโค้ดเดิมออกทั้งหมด แล้ววางโค้ดนี้ (รองรับการรับข้อมูลแบบ Batch หลายรายการพร้อมกัน และเช็ค ID ป้องกันข้อมูลซ้ำ 100%):
    ```javascript
    function doPost(e) {
-     var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+     var ss = SpreadsheetApp.getActiveSpreadsheet();
      var data = JSON.parse(e.postData.contents);
-     sheet.appendRow([
-       new Date(),
-       data.date,
-       data.type === 'expense' ? 'รายจ่าย' : 'รายรับ',
-       data.categoryLabel,
-       data.title,
-       data.amount,
-       data.quantity || 1,
-       data.unit || '',
-       data.recordedBy,
-       data.notes || ''
-     ]);
+     
+     // 1. จัดการแปลงปลูก (Cycle) พร้อมป้องกันสร้างซ้ำ
+     if (data.action === 'add_cycle') {
+       var cycleSheet = ss.getSheetByName("แปลงปลูก");
+       if (!cycleSheet) {
+         cycleSheet = ss.insertSheet("แปลงปลูก");
+         cycleSheet.appendRow(["รหัสแปลง (ID)", "ชื่อแปลง", "ชนิดพืช", "ไร่รวม", "ไร่", "งาน", "วา", "วันเริ่มปลูก", "วันคาดเก็บเกี่ยว", "ผลผลิตคาดการณ์", "ราคาเป้าหมาย"]);
+       }
+       var existingCycleIds = getExistingIds(cycleSheet);
+       if (!existingCycleIds[data.id]) {
+         cycleSheet.appendRow([
+           data.id, data.name, data.cropType, data.totalAreaRai,
+           data.areaRai, data.areaNgan, data.areaSqWa,
+           data.startDate, data.expectedHarvestDate,
+           data.expectedYieldKg, data.targetPricePerKg
+         ]);
+       }
+       return ContentService.createTextOutput(JSON.stringify({result: 'success'}))
+         .setMimeType(ContentService.MimeType.JSON);
+     }
+
+     // 2. จัดเตรียมแผ่นงาน "รายการ"
+     var sheet = ss.getSheetByName("รายการ") || ss.getActiveSheet();
+     if (sheet.getLastRow() === 0) {
+       sheet.appendRow(["รหัสรายการ (ID)", "วันที่ทำรายการ", "ประเภท", "หมวดหมู่", "ชื่อรายการ", "ยอดเงิน (บาท)", "จำนวน", "หน่วย", "ผู้บันทึก", "หมายเหตุ", "รหัสแปลง"]);
+     }
+
+     var existingTxIds = getExistingIds(sheet);
+
+     // 3. รองรับการส่งแบบชุดหลายรายการพร้อมกัน (Batch Sync จาก Offline Queue)
+     if (data.action === 'batch_sync' && Array.isArray(data.transactions)) {
+       var rowsToAppend = [];
+       for (var i = 0; i < data.transactions.length; i++) {
+         var t = data.transactions[i];
+         if (!t.id || existingTxIds[t.id]) continue; // ข้ามรายการซ้ำ
+         existingTxIds[t.id] = true;
+         rowsToAppend.push(formatTxRow(t));
+       }
+       if (rowsToAppend.length > 0) {
+         sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
+       }
+       return ContentService.createTextOutput(JSON.stringify({result: 'success', added: rowsToAppend.length}))
+         .setMimeType(ContentService.MimeType.JSON);
+     }
+
+     // 4. บันทึกรายการเดี่ยว (Single Transaction) พร้อมเช็ค ID กันซ้ำ
+     if (!existingTxIds[data.id]) {
+       sheet.appendRow(formatTxRow(data));
+     }
+
      return ContentService.createTextOutput(JSON.stringify({result: 'success'}))
        .setMimeType(ContentService.MimeType.JSON);
+   }
+
+   function formatTxRow(data) {
+     return [
+       data.id || ('tx-' + Date.now()),
+       data.date || '',
+       data.type === 'expense' ? 'รายจ่าย' : 'รายรับ',
+       data.categoryLabel || 'ทั่วไป',
+       data.title || 'รายการ',
+       Number(data.amount) || 0,
+       Number(data.quantity) || 1,
+       data.unit || '',
+       data.recordedBy === 'dad' ? 'พ่อ' : data.recordedBy === 'mom' ? 'แม่' : data.recordedBy === 'sibling' ? 'พี่' : 'เรา',
+       data.notes || '',
+       data.cycleId || ''
+     ];
+   }
+
+   function getExistingIds(sheet) {
+     var ids = {};
+     var lastRow = sheet.getLastRow();
+     if (lastRow > 1) {
+       var values = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+       for (var i = 0; i < values.length; i++) {
+         if (values[i][0]) ids[String(values[i][0])] = true;
+       }
+     }
+     return ids;
    }
    ```
 4. กดปุ่มสีน้ำเงิน **ทำให้ใช้งานได้ (Deploy) -> การทำให้ใช้งานได้ใหม่ (New deployment)**

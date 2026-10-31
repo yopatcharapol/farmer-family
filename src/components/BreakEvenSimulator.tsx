@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { CropCycle } from '../types';
 import { formatMoney, calculateBreakEvenPrice } from '../utils/thaiAgUnits';
-import { Calculator, ArrowRight, Sparkles } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 
 interface BreakEvenSimulatorProps {
   currentCycle: CropCycle;
