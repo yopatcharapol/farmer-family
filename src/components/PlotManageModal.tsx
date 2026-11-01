@@ -3,7 +3,15 @@ import { X, Edit3, CheckCircle, Trash2, Archive, AlertCircle } from 'lucide-reac
 import { CropCycle, Transaction } from '../types';
 import { calculateTotalRai, formatMoney, formatAreaThai, formatDateThai } from '../utils/thaiAgUnits';
 import { db } from '../db/db';
-import { pushCycleToGoogleSheets, DEFAULT_WEBHOOK_URL } from '../services/cloudSync';
+import {
+  pushCycleToGoogleSheets,
+  deleteCycleFromGoogleSheets,
+  markCycleAsDeleted,
+  isCycleDeleted,
+  markTransactionAsDeleted,
+  deleteTransactionFromGoogleSheets,
+  DEFAULT_WEBHOOK_URL
+} from '../services/cloudSync';
 
 interface PlotManageModalProps {
   isOpen: boolean;
@@ -83,31 +91,63 @@ export const PlotManageModal: React.FC<PlotManageModalProps> = ({
       await db.cycles.put(closedCycle);
 
       const settings = await db.settings.get('default');
-      if (settings?.googleSheetWebhookUrl) {
-        pushCycleToGoogleSheets(settings.googleSheetWebhookUrl, closedCycle);
+      const targetUrl = settings?.googleSheetWebhookUrl || DEFAULT_WEBHOOK_URL;
+      if (targetUrl) {
+        pushCycleToGoogleSheets(targetUrl, closedCycle);
       }
 
       // สลับไปแปลงอื่นที่ยัง active อยู่
-      const otherActive = cycles.find((c) => c.id !== currentCycle.id && c.status === 'active');
+      const otherActive = cycles.find((c) => c.id !== currentCycle.id && c.status === 'active' && !isCycleDeleted(c.id));
       if (otherActive) {
         onSelectCycle(otherActive.id);
+        await db.settings.update('default', { activeCycleId: otherActive.id });
+      } else {
+        onSelectCycle('');
+        await db.settings.update('default', { activeCycleId: '' });
       }
       onClose();
     }
   };
 
-  // ลบแปลง
+  // ลบแปลง พร้อม Tombstone ป้องกันการเด้งกลับและส่งคำสั่งลบขึ้น Google Sheets
   const handleDeleteCycle = async () => {
     if (confirm(`⚠️ ยืนยันการลบแปลง "${currentCycle.name}" หรือไม่?\n\n(รายการบัญชีที่บันทึกไว้ในแปลงนี้จะถูกลบออกด้วย)`)) {
-      await db.cycles.delete(currentCycle.id);
-      await db.transactions.where('cycleId').equals(currentCycle.id).delete();
-      await db.plotLogs.where('plotId').equals(currentCycle.id).delete();
+      const cycleIdToDelete = currentCycle.id;
 
-      const remaining = cycles.filter((c) => c.id !== currentCycle.id);
-      if (remaining.length > 0) {
-        onSelectCycle(remaining[0].id);
+      // 1. Mark as deleted in tombstone
+      markCycleAsDeleted(cycleIdToDelete);
+
+      // 2. Mark related transactions as deleted in tombstone & collect them
+      const relatedTxs = await db.transactions.where('cycleId').equals(cycleIdToDelete).toArray();
+      for (const t of relatedTxs) {
+        markTransactionAsDeleted(t.id);
+      }
+
+      // 3. Delete from IndexedDB
+      await db.cycles.delete(cycleIdToDelete);
+      await db.transactions.where('cycleId').equals(cycleIdToDelete).delete();
+      await db.plotLogs.where('plotId').equals(cycleIdToDelete).delete();
+
+      // 4. Send delete to Google Sheets
+      const settings = await db.settings.get('default');
+      const targetUrl = settings?.googleSheetWebhookUrl || DEFAULT_WEBHOOK_URL;
+      if (targetUrl) {
+        deleteCycleFromGoogleSheets(targetUrl, cycleIdToDelete).catch(console.error);
+        for (const t of relatedTxs) {
+          deleteTransactionFromGoogleSheets(targetUrl, t.id).catch(console.error);
+        }
+      }
+
+      // 5. Select remaining active cycle
+      const remaining = cycles.filter((c) => c.id !== cycleIdToDelete && !isCycleDeleted(c.id));
+      const nextActive = remaining.find((c) => c.status === 'active') || remaining[0];
+
+      if (nextActive) {
+        onSelectCycle(nextActive.id);
+        await db.settings.update('default', { activeCycleId: nextActive.id });
       } else {
         onSelectCycle('');
+        await db.settings.update('default', { activeCycleId: '' });
       }
       onClose();
     }

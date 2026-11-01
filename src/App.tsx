@@ -52,7 +52,9 @@ import {
   deleteTransactionFromGoogleSheets,
   pushCycleToGoogleSheets,
   syncPendingQueue,
-  markTransactionAsDeleted
+  markTransactionAsDeleted,
+  isCycleDeleted,
+  unmarkCycleAsDeleted
 } from './services/cloudSync';
 import { RefreshCw, Wrench } from 'lucide-react';
 
@@ -186,8 +188,11 @@ export function App() {
     });
   }, []);
 
-  // Live queries from IndexedDB
-  const cycles = useLiveQuery(() => db.cycles.where('status').notEqual('deleted').toArray()) || [];
+  // Live queries from IndexedDB (คัดกรองแปลงที่ลบแล้ว หรือชื่อเสีย ?)
+  const cycles = useLiveQuery(async () => {
+    const list = await db.cycles.where('status').notEqual('deleted').toArray();
+    return list.filter((c) => !isCycleDeleted(c.id) && !c.name.includes('?'));
+  }) || [];
   const settings = useLiveQuery(() => db.settings.get('default'));
   const familyMembers = settings?.familyMembers || DEFAULT_FAMILY_MEMBERS;
 
@@ -213,6 +218,8 @@ export function App() {
         const firstActive = cycles.find((c) => c.status === 'active') || cycles[0];
         setActiveCycleId(firstActive.id);
       }
+    } else {
+      setActiveCycleId('');
     }
   }, [cycles, activeCycleId]);
 
@@ -281,6 +288,7 @@ export function App() {
 
   // Add new cycle
   const handleAddCycle = async (newCycle: CropCycle) => {
+    unmarkCycleAsDeleted(newCycle.id);
     await db.cycles.add(newCycle);
     setActiveCycleId(newCycle.id);
     await db.settings.update('default', { activeCycleId: newCycle.id });

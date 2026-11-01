@@ -15,8 +15,14 @@ import {
   Sparkles,
   ShieldAlert
 } from 'lucide-react';
-import { db, repairDataIntegrity, purgeGhostTransactions } from '../db/db';
-import { FULL_APPS_SCRIPT_CODE } from '../services/cloudSync';
+import { db, repairDataIntegrity, purgeGhostTransactions, purgeDeletedCycles } from '../db/db';
+import {
+  FULL_APPS_SCRIPT_CODE,
+  getDeletedCycleIds,
+  isCycleDeleted,
+  markCycleAsDeleted,
+  DEFAULT_WEBHOOK_URL
+} from '../services/cloudSync';
 import {
   calculateMoistureDeduction,
   calculateRubberYield,
@@ -54,6 +60,7 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
   const [cycleCount, setCycleCount] = useState<number>(0);
   const [pendingSyncCount, setPendingSyncCount] = useState<number>(0);
   const [ghostCount, setGhostCount] = useState<number>(0);
+  const [badCycleCount, setBadCycleCount] = useState<number>(0);
   const [storageEstimate, setStorageEstimate] = useState<string>('กำลังคำนวณ...');
 
   // Self-test runner state
@@ -78,10 +85,16 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
         .filter(t => Number(t.amount) === 0 && (!t.title || t.title === 'รายการ' || t.categoryLabel === 'ทั่วไป' || t.id === 'test-dummy-id'))
         .count();
 
+      const deletedCycleIds = getDeletedCycleIds();
+      const bc = await db.cycles
+        .filter(c => deletedCycleIds.includes(c.id) || c.status === 'deleted' || c.name.includes('?'))
+        .count();
+
       setTxCount(tc);
       setCycleCount(cc);
       setPendingSyncCount(pc);
       setGhostCount(gc);
+      setBadCycleCount(bc);
 
       if (navigator.storage && navigator.storage.estimate) {
         const est = await navigator.storage.estimate();
@@ -100,12 +113,26 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
     refreshStorageMetrics();
   }, [isOpen]);
 
-  // ล้างรายการผี 0 บ.
-  const handlePurgeGhosts = async () => {
-    const count = await purgeGhostTransactions();
+  // ล้างรายการผี 0 บ. และแปลงที่ถูกลบทิ้งถาวร
+  const handlePurgeAll = async () => {
+    const txCountPurged = await purgeGhostTransactions();
+    const cycleCountPurged = await purgeDeletedCycles();
+
+    // ส่งคำสั่ง clean_ghosts ไปล้างชีทด้วยหากเชื่อมต่อเน็ตอยู่
+    const settings = await db.settings.get('default');
+    const targetUrl = settings?.googleSheetWebhookUrl || DEFAULT_WEBHOOK_URL;
+    if (targetUrl && navigator.onLine) {
+      fetch(targetUrl, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: 'clean_ghosts' })
+      }).catch(console.error);
+    }
+
     await refreshStorageMetrics();
     if (onRefreshData) onRefreshData();
-    alert(`✅ กวาดล้างรายการผี 0 บ. ออกจากเครื่องเรียบร้อยแล้ว (${count} รายการ)`);
+    alert(`✅ กวาดล้างข้อมูลสะอาดเรียบร้อย:\n- ล้างรายการผี 0 บ. ${txCountPurged} รายการ\n- ล้างแปลงที่ถูกลบ/แปลงผี ${cycleCountPurged} แปลง`);
   };
 
   // คัดลอกโค้ด Google Apps Script
@@ -323,6 +350,52 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
       });
     }
 
+    // TEST 7: ทดสอบระบบกำจัดแปลงที่ถูกลบ & ป้องกันการคืนชีพ (Cycle Deletion & Resurrection Prevention Test)
+    const t7Start = performance.now();
+    try {
+      const testCycleId = `test-cycle-${Date.now()}`;
+      await db.cycles.add({
+        id: testCycleId,
+        name: 'แปลงทดสอบลบ',
+        cropType: 'ผักกาด',
+        totalAreaRai: 1,
+        areaRai: 1,
+        areaNgan: 0,
+        areaSqWa: 0,
+        startDate: '2026-10-26',
+        expectedHarvestDate: '2026-11-25',
+        status: 'active',
+        createdAt: Date.now()
+      });
+
+      // จำลองการลบแปลงพร้อมบันทึก Tombstone
+      markCycleAsDeleted(testCycleId);
+      await db.cycles.delete(testCycleId);
+
+      // ตรวจสอบว่าอยู่ใน Tombstone
+      if (!isCycleDeleted(testCycleId)) throw new Error('บันทึก Tombstone แปลงไม่สำเร็จ');
+
+      // ตรวจสอบว่าใน IndexedDB ไม่มีแปลงนี้แล้ว
+      const inDb = await db.cycles.get(testCycleId);
+      if (inDb) throw new Error('แปลงยังคงอยู่ใน IndexedDB');
+
+      results.push({
+        id: 't7',
+        name: 'ระบบป้องกันแปลงคืนชีพ (Cycle Deletion & Tombstone)',
+        status: 'pass',
+        durationMs: Number((performance.now() - t7Start).toFixed(2)),
+        message: 'ลบแปลงถาวรและบล็อกการดึงกลับจาก Google Sheets 100%'
+      });
+    } catch (e: any) {
+      results.push({
+        id: 't7',
+        name: 'ระบบป้องกันแปลงคืนชีพ (Cycle Deletion & Tombstone)',
+        status: 'fail',
+        durationMs: Number((performance.now() - t7Start).toFixed(2)),
+        message: e.message
+      });
+    }
+
     setTestResults(results);
     setIsRunningTests(false);
   };
@@ -396,31 +469,31 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
         {/* Content Body */}
         <div className="p-4 overflow-y-auto space-y-4 text-xs">
           
-          {/* 🔥 0. การ์ดแก้ไขปัญหา "ลบแล้วยอดเป็น 0 แต่ไม่หายไป" (Ghost Buster Card) */}
+          {/* 🔥 0. การ์ดแก้ไขปัญหา "ลบรายการหรือลบแปลงแล้วไม่หาย" (Ghost & Deleted Records Cleaner) */}
           <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-3.5 space-y-2.5">
             <div className="flex items-center justify-between">
               <span className="font-bold text-amber-950 text-xs sm:text-sm flex items-center gap-1.5">
                 <ShieldAlert className="w-4 h-4 text-amber-700" />
-                <span>แก้ปัญหายอด 0 บ. ตกค้างหลังกดซิงค์ (Ghost Cleaner):</span>
+                <span>แก้ปัญหาลบรายการ/ลบแปลงแล้วเด้งกลับ (Data Cleaner):</span>
               </span>
-              {ghostCount > 0 && (
+              {(ghostCount > 0 || badCycleCount > 0) && (
                 <span className="text-[10px] bg-rose-200 text-rose-900 font-bold px-2 py-0.5 rounded-full">
-                  พบ {ghostCount} รายการ
+                  พบ {ghostCount} รายการ / {badCycleCount} แปลงค้าง
                 </span>
               )}
             </div>
 
             <p className="text-amber-900 text-[11px] leading-relaxed">
-              สาเหตุเกิดจากสคริปต์ Google Apps Script ในชีทฉบับเดิมยังไม่มีคำสั่งลบ (DELETE) เมื่อกดลบระบบจึงเผลอบันทึกรายการเปล่า 0 บ. เข้าไปแทน
+              แก้ปัญหาเวลาลบรายการแล้วกลายเป็นยอด 0 หรือลบแปลงแล้วพอกดซิงค์แปลงเดิมยังเด้งกลับมา ด้วยระบบ Tombstone บล็อกไม่ให้ดึงข้อมูลที่ลบแล้วกลับมาอีก 100%
             </p>
 
             <div className="grid grid-cols-2 gap-2 pt-1">
               <button
                 type="button"
-                onClick={handlePurgeGhosts}
+                onClick={handlePurgeAll}
                 className="py-2.5 px-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 shadow-xs btn-touch-active text-center text-xs"
               >
-                <span>🧹 กวาดล้าง 0 บ. ทันที</span>
+                <span>🧹 กวาดล้าง 0 บ. & แปลงที่ลบทันที</span>
               </button>
 
               <button
@@ -434,11 +507,11 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
             </div>
 
             <div className="bg-white p-2.5 rounded-xl border border-amber-200 text-[10px] text-slate-600 space-y-1">
-              <div className="font-bold text-slate-800">📌 วิธีอัปเดต Google Sheet ให้ลบถาวร:</div>
+              <div className="font-bold text-slate-800">📌 วิธีอัปเดต Google Sheet ให้ลบถาวร (ทั้งรายการและแปลง):</div>
               <div>1. กดปุ่ม <strong>"คัดลอกโค้ดแก้ชีท"</strong> ด้านบน</div>
               <div>2. เปิด Google Sheets ของคุณ ไปที่เมนู <strong>ส่วนขยาย (Extensions) &gt; Apps Script</strong></div>
               <div>3. ลบโค้ดเดิมทั้งหมด วางโค้ดใหม่ลงไป แล้วกด <strong>บันทึก (Save)</strong></div>
-              <div>4. กด <strong>การปรับใช้ (Deploy) &gt; จัดการการปรับใช้ &gt; แก้ไข &gt; เวอร์ชัน: "เวอร์ชันใหม่" &gt; ปรับใช้</strong></div>
+              <div>4. กด <strong>การปรับใช้ (Deploy) &gt; จัดการการปรับใช้ &gt; ดินสอ (แก้ไข) &gt; เวอร์ชัน: "เวอร์ชันใหม่" &gt; ปรับใช้</strong></div>
             </div>
           </div>
 

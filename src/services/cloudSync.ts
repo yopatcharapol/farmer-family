@@ -1,15 +1,15 @@
-import { db, purgeGhostTransactions } from '../db/db';
+import { db, purgeGhostTransactions, purgeDeletedCycles } from '../db/db';
 import { Transaction, CropCycle } from '../types';
 import { getTodayIso } from '../utils/thaiAgUnits';
 
 /**
  * บริการซิงค์ข้อมูลสองทางกับ Google Sheets (Two-Way Cloud Sync)
- * พร้อมระบบคัดกรองและป้องกันรายการผี 0 บ. (Ghost Records Protection)
+ * พร้อมระบบคัดกรองและป้องกันรายการผี 0 บ. และแปลงที่ถูกลบ (Tombstone & Ghost Records Protection)
  */
 
 export const DEFAULT_WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycbyL_T7Us7Irx9FI0eP_XjwPv6tDSdmx4zPHZGOFVq2RWocVJT_m-upr_dmijpYSemGHmQ/exec';
 
-// บันทึก ID รายการที่เคยถูกลบ เพื่อป้องกันการดึงกลับมาทับซ้ำ (Tombstone Protection)
+// บันทึก ID รายการที่เคยถูกลบ เพื่อป้องกันการดึงกลับมาทับซ้ำ (Transaction Tombstone Protection)
 export function markTransactionAsDeleted(id: string) {
   try {
     const raw = localStorage.getItem('farmer_deleted_tx_ids') || '[]';
@@ -28,6 +28,66 @@ export function isTransactionDeleted(id: string): boolean {
     return list.includes(id);
   } catch (e) {
     return false;
+  }
+}
+
+// บันทึก ID แปลงที่เคยถูกลบ เพื่อป้องกันการดึงกลับมาทับซ้ำ (Cycle Tombstone Protection)
+export function markCycleAsDeleted(id: string) {
+  try {
+    const raw = localStorage.getItem('farmer_deleted_cycle_ids') || '[]';
+    const list: string[] = JSON.parse(raw);
+    if (!list.includes(id)) {
+      list.push(id);
+      localStorage.setItem('farmer_deleted_cycle_ids', JSON.stringify(list.slice(-200)));
+    }
+  } catch (e) {}
+}
+
+export function unmarkCycleAsDeleted(id: string) {
+  try {
+    const raw = localStorage.getItem('farmer_deleted_cycle_ids') || '[]';
+    const list: string[] = JSON.parse(raw);
+    const filtered = list.filter(item => item !== id);
+    localStorage.setItem('farmer_deleted_cycle_ids', JSON.stringify(filtered));
+  } catch (e) {}
+}
+
+export function isCycleDeleted(id: string): boolean {
+  try {
+    const raw = localStorage.getItem('farmer_deleted_cycle_ids') || '[]';
+    const list: string[] = JSON.parse(raw);
+    return list.includes(id);
+  } catch (e) {
+    return false;
+  }
+}
+
+export function getDeletedCycleIds(): string[] {
+  try {
+    const raw = localStorage.getItem('farmer_deleted_cycle_ids') || '[]';
+    return JSON.parse(raw);
+  } catch (e) {
+    return [];
+  }
+}
+
+export function queuePendingCycleDelete(id: string) {
+  try {
+    const raw = localStorage.getItem('farmer_pending_cycle_deletes') || '[]';
+    const list: string[] = JSON.parse(raw);
+    if (!list.includes(id)) {
+      list.push(id);
+      localStorage.setItem('farmer_pending_cycle_deletes', JSON.stringify(list));
+    }
+  } catch (e) {}
+}
+
+export function getPendingCycleDeletes(): string[] {
+  try {
+    const raw = localStorage.getItem('farmer_pending_cycle_deletes') || '[]';
+    return JSON.parse(raw);
+  } catch (e) {
+    return [];
   }
 }
 
@@ -53,8 +113,9 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
   }
 
   try {
-    // ล้างรายการผี 0 บาทในเครื่องก่อนเริ่มซิงค์
+    // ล้างรายการผี 0 บาท และแปลงที่ถูกลบในเครื่องก่อนเริ่มซิงค์
     await purgeGhostTransactions();
+    await purgeDeletedCycles();
 
     const response = await fetch(targetUrl, {
       method: 'GET',
@@ -70,26 +131,31 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
     const data = await response.json();
     let newTxCount = 0;
 
-    // 1.1 ซิงค์แปลงเพาะปลูก (Cycles) จาก Google Sheets ลงเครื่อง
+    // 1.1 ซิงค์แปลงเพาะปลูก (Cycles) จาก Google Sheets ลงเครื่อง (พร้อม Tombstone Protection & กรองชื่อเสีย ?)
     let primaryCycleId = '';
     if (data.cycles && Array.isArray(data.cycles) && data.cycles.length > 0) {
-      const cleanCycles = data.cycles.filter((c: any) => c.name && !c.name.includes('?'));
-      const listToSync = cleanCycles.length > 0 ? cleanCycles : data.cycles;
+      const validCycles = data.cycles.filter((c: any) => {
+        if (!c.id) return false;
+        const cId = String(c.id).trim();
+        // ถ้าเคยถูกลบในเครื่อง หรือถูกปิด/ลบในระบบ ห้ามดึงกลับมาทับเด็ดขาด
+        if (isCycleDeleted(cId)) return false;
+        if (c.status === 'deleted') return false;
+        const nameStr = String(c.name || '').trim();
+        if (nameStr.includes('?') || !nameStr) return false;
+        return true;
+      });
 
-      for (const c of listToSync) {
-        if (!c.id) continue;
-        let cName = String(c.name || 'แปลงเพาะปลูก');
-        let cCrop = String(c.cropType || 'ผักกาด');
-        
-        if (cName.includes('?')) {
-          cName = 'แปลง - ผักกาด (26/10/2569)';
-          cCrop = 'ผักกาด';
-        }
+      const seenCycleIds = new Set<string>();
+
+      for (const c of validCycles) {
+        const cId = String(c.id).trim();
+        if (seenCycleIds.has(cId)) continue;
+        seenCycleIds.add(cId);
 
         const normalizedCycle: CropCycle = {
-          id: String(c.id),
-          name: cName,
-          cropType: cCrop,
+          id: cId,
+          name: String(c.name || 'แปลงเพาะปลูก'),
+          cropType: String(c.cropType || 'ผักกาด'),
           totalAreaRai: Number(c.totalAreaRai) || 0.5,
           areaRai: Number(c.areaRai) || 0,
           areaNgan: Number(c.areaNgan) || 2,
@@ -112,7 +178,9 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
 
     if (!primaryCycleId) {
       const firstCycle = await db.cycles.where('status').equals('active').first();
-      if (firstCycle) primaryCycleId = firstCycle.id;
+      if (firstCycle && !isCycleDeleted(firstCycle.id) && !firstCycle.name.includes('?')) {
+        primaryCycleId = firstCycle.id;
+      }
     }
 
     // 1.2 ซิงค์รายการบันทึก (Transactions) จาก Google Sheets ลงเครื่อง พร้อมคัดกรองรายการผี 0 บ.
@@ -299,7 +367,39 @@ export async function deleteTransactionFromGoogleSheets(webhookUrl: string, tran
   }
 }
 
-// 2.3 ประมวลผลคิวรอส่งข้อมูล (Flush Offline Sync Queue)
+// 2.3 ส่งคำสั่งลบแปลงเพาะปลูก (DELETE CYCLE) พร้อมบันทึก Tombstone กันเด้งกลับ
+export async function deleteCycleFromGoogleSheets(webhookUrl: string, cycleId: string): Promise<boolean> {
+  // บันทึก ID แปลงที่ถูกลบลง Tombstone ทันที
+  markCycleAsDeleted(cycleId);
+  await db.cycles.delete(cycleId);
+
+  const targetUrl = webhookUrl || DEFAULT_WEBHOOK_URL;
+  if (!targetUrl) return true;
+
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    queuePendingCycleDelete(cycleId);
+    return false;
+  }
+
+  try {
+    await fetch(targetUrl, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'delete_cycle',
+        id: cycleId
+      })
+    });
+    return true;
+  } catch (e) {
+    console.warn('Delete cycle from sheets failed (offline):', e);
+    queuePendingCycleDelete(cycleId);
+    return false;
+  }
+}
+
+// 2.4 ประมวลผลคิวรอส่งข้อมูล (Flush Offline Sync Queue)
 export async function syncPendingQueue(webhookUrl: string): Promise<{ syncedCount: number; failedCount: number; message: string }> {
   const targetUrl = webhookUrl || DEFAULT_WEBHOOK_URL;
   if (!targetUrl) {
@@ -311,6 +411,26 @@ export async function syncPendingQueue(webhookUrl: string): Promise<{ syncedCoun
   }
 
   let syncedCount = 0;
+
+  // 0. ส่งคำสั่งลบแปลงที่ค้างส่ง (pending_cycle_deletes)
+  const pendingCycleDeletes = getPendingCycleDeletes();
+  for (const cId of pendingCycleDeletes) {
+    try {
+      markCycleAsDeleted(cId);
+      await fetch(targetUrl, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: 'delete_cycle', id: cId })
+      });
+      syncedCount++;
+    } catch (e) {
+      // ignore
+    }
+  }
+  try {
+    localStorage.removeItem('farmer_pending_cycle_deletes');
+  } catch (e) {}
 
   // 1. ส่งรายการที่รอการลบ (pending_delete)
   const pendingDeletes = await db.transactions
@@ -408,7 +528,7 @@ export async function pushCycleToGoogleSheets(webhookUrl: string, cycle: CropCyc
   }
 }
 
-// 4. สคริปต์ Google Apps Script ฉบับสมบูรณ์ (พร้อมระบบตัดรายการผี 0 บ. อัตโนมัติ)
+// 4. สคริปต์ Google Apps Script ฉบับสมบูรณ์ (พร้อมระบบตัดรายการผี 0 บ. และลบแปลงถาวร)
 export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("รายการ") || ss.getActiveSheet();
@@ -451,18 +571,23 @@ export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
     }
   }
 
-  // ดึงแปลงเพาะปลูก
+  // ดึงแปลงเพาะปลูก (กรองแปลงที่ลบแล้ว หรือชื่อเสีย ? ออก และตัดแถวซ้ำ)
   var cycleSheet = ss.getSheetByName("แปลงปลูก");
   var cycles = [];
+  var seenCycleIds = {};
   if (cycleSheet) {
     var cRows = cycleSheet.getDataRange().getValues();
     for (var j = 1; j < cRows.length; j++) {
       var cr = cRows[j];
-      if (!cr[0]) continue;
-      var cName = String(cr[1] || '');
-      if (cName.indexOf('?') !== -1) continue;
+      var cId = String(cr[0] || '').trim();
+      var cName = String(cr[1] || '').trim();
+      var cStatus = String(cr[11] || 'active').trim();
+      if (!cId || cStatus === 'deleted' || cName.indexOf('?') !== -1) continue;
+      if (seenCycleIds[cId]) continue;
+      seenCycleIds[cId] = true;
+
       cycles.push({
-        id: String(cr[0]),
+        id: cId,
         name: cName,
         cropType: String(cr[2] || 'ผักกาด'),
         totalAreaRai: Number(cr[3]) || 0.5,
@@ -473,7 +598,7 @@ export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
         expectedHarvestDate: cr[8] ? formatDateIso(cr[8]) : '',
         expectedYieldKg: Number(cr[9]) || 0,
         targetPricePerKg: Number(cr[10]) || 0,
-        status: String(cr[11] || 'active'),
+        status: cStatus,
         finalProfit: Number(cr[12]) || 0,
         createdAt: Date.now()
       });
@@ -495,8 +620,28 @@ function doPost(e) {
   var data = JSON.parse(e.postData.contents);
   var action = data.action;
 
-  // 1. จัดการแปลงปลูก (Cycle)
+  // 1.1 ลบแปลงเพาะปลูก (DELETE CYCLE)
+  if (action === 'delete_cycle') {
+    var cycleSheet = ss.getSheetByName("แปลงปลูก");
+    var deletedCyclesCount = 0;
+    if (cycleSheet && cycleSheet.getLastRow() > 1) {
+      var lastRow = cycleSheet.getLastRow();
+      for (var r = lastRow; r >= 2; r--) {
+        var rId = String(cycleSheet.getRange(r, 1).getValue() || '');
+        if (rId === String(data.id) || !rId) {
+          cycleSheet.deleteRow(r);
+          deletedCyclesCount++;
+        }
+      }
+    }
+    return ContentService.createTextOutput(JSON.stringify({result: 'success', action: 'cycle_deleted', count: deletedCyclesCount})).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // 1.2 เพิ่มหรือแก้ไขแปลงปลูก (ADD/UPDATE CYCLE)
   if (action === 'add_cycle' || action === 'update_cycle') {
+    if (String(data.name || '').indexOf('?') !== -1) {
+      return ContentService.createTextOutput(JSON.stringify({result: 'skipped_corrupted_cycle'})).setMimeType(ContentService.MimeType.JSON);
+    }
     var cycleSheet = ss.getSheetByName("แปลงปลูก");
     if (!cycleSheet) {
       cycleSheet = ss.insertSheet("แปลงปลูก");
@@ -524,7 +669,7 @@ function doPost(e) {
     sheet.appendRow(["รหัสรายการ (ID)", "วันที่", "ประเภท", "หมวดหมู่", "ชื่อรายการ", "ยอดเงิน", "จำนวน", "หน่วย", "ผู้บันทึก", "หมายเหตุ", "รหัสแปลง", "การจ่ายเงิน", "เจ้าหนี้/ร้านค้า", "คนควักเงิน", "น้ำหนักสุทธิ(กก)"]);
   }
 
-  // 2.1 ลบรายการเดี่ยว (DELETE)
+  // 2.1 ลบรายการเดี่ยว (DELETE TRANSACTION)
   if (action === 'delete_transaction') {
     var delRow = findRowById(sheet, data.id);
     if (delRow > 0) {
@@ -533,7 +678,7 @@ function doPost(e) {
     return ContentService.createTextOutput(JSON.stringify({result: 'success', action: 'deleted'})).setMimeType(ContentService.MimeType.JSON);
   }
 
-  // 2.2 กวาดล้างรายการผี 0 บาททั้งหมดในแผ่นงาน (CLEAN GHOSTS)
+  // 2.2 กวาดล้างรายการผี 0 บาทและแปลงผีทั้งหมด (CLEAN GHOSTS)
   if (action === 'clean_ghosts') {
     var lastRow = sheet.getLastRow();
     var deletedCount = 0;
@@ -543,16 +688,28 @@ function doPost(e) {
         var rId = String(rowValues[0] || '');
         var rTitle = String(rowValues[4] || '').trim();
         var rAmt = Number(rowValues[5]) || 0;
-        if ((rAmt === 0 && (rTitle === 'รายการ' || rTitle === '')) || rId === 'test-dummy-id') {
+        if ((rAmt === 0 && (rTitle === 'รายการ' || rTitle === '')) || rId === 'test-dummy-id' || !rId) {
           sheet.deleteRow(r);
           deletedCount++;
         }
       }
     }
-    return ContentService.createTextOutput(JSON.stringify({result: 'success', cleaned: deletedCount})).setMimeType(ContentService.MimeType.JSON);
+    var cSheet = ss.getSheetByName("แปลงปลูก");
+    var deletedCycles = 0;
+    if (cSheet && cSheet.getLastRow() > 1) {
+      for (var cr = cSheet.getLastRow(); cr >= 2; cr--) {
+        var cId = String(cSheet.getRange(cr, 1).getValue() || '');
+        var cName = String(cSheet.getRange(cr, 2).getValue() || '');
+        if (!cId || cName.indexOf('?') !== -1) {
+          cSheet.deleteRow(cr);
+          deletedCycles++;
+        }
+      }
+    }
+    return ContentService.createTextOutput(JSON.stringify({result: 'success', cleanedTransactions: deletedCount, cleanedCycles: deletedCycles})).setMimeType(ContentService.MimeType.JSON);
   }
 
-  // 2.3 แก้ไขรายการ (UPDATE)
+  // 2.3 แก้ไขรายการ (UPDATE TRANSACTION)
   if (action === 'update_transaction') {
     var updRow = findRowById(sheet, data.id);
     var rowData = formatTxRow(data);
@@ -581,8 +738,13 @@ function doPost(e) {
     return ContentService.createTextOutput(JSON.stringify({result: 'success', added: rowsToAppend.length})).setMimeType(ContentService.MimeType.JSON);
   }
 
-  // 2.5 บันทึกเดี่ยว (ADD) - ห้ามบันทึกรายการ 0 บาทที่มีชื่อว่า 'รายการ'
-  if (Number(data.amount) === 0 && (String(data.title).trim() === 'รายการ' || !data.title)) {
+  // 2.5 ป้องกันคำสั่งแปลกปลอมหรือ POST ที่ไม่มีข้อมูลรายการ
+  if (action && action !== 'add_transaction') {
+    return ContentService.createTextOutput(JSON.stringify({result: 'ignored_unknown_action', action: action})).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // 2.6 บันทึกเดี่ยว (ADD TRANSACTION) - ห้ามบันทึกรายการ 0 บาทที่ไม่มีชื่อจริง
+  if (!data.id || (Number(data.amount) === 0 && (String(data.title || '').trim() === 'รายการ' || !data.title))) {
     return ContentService.createTextOutput(JSON.stringify({result: 'skipped_ghost'})).setMimeType(ContentService.MimeType.JSON);
   }
 
@@ -596,7 +758,7 @@ function doPost(e) {
   return ContentService.createTextOutput(JSON.stringify({result: 'success'})).setMimeType(ContentService.MimeType.JSON);
 }
 
-// ฟังก์ชันสำหรับกดรันใน Google Apps Script เพื่อล้างแถวผี 0 บ. ทันที
+// ฟังก์ชันสำหรับกดรันใน Google Apps Script เพื่อล้างแถวผี 0 บ. และแปลงผีทันที
 function cleanGhostRows() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("รายการ") || ss.getActiveSheet();
@@ -607,12 +769,24 @@ function cleanGhostRows() {
     var rTitle = String(rowValues[4] || '').trim();
     var rAmt = Number(rowValues[5]) || 0;
     var rId = String(rowValues[0] || '');
-    if ((rAmt === 0 && (rTitle === 'รายการ' || rTitle === '')) || rId === 'test-dummy-id') {
+    if ((rAmt === 0 && (rTitle === 'รายการ' || rTitle === '')) || rId === 'test-dummy-id' || !rId) {
       sheet.deleteRow(r);
       count++;
     }
   }
-  Logger.log("Deleted " + count + " ghost rows");
+  var cSheet = ss.getSheetByName("แปลงปลูก");
+  var cCount = 0;
+  if (cSheet && cSheet.getLastRow() > 1) {
+    for (var cr = cSheet.getLastRow(); cr >= 2; cr--) {
+      var cId = String(cSheet.getRange(cr, 1).getValue() || '');
+      var cName = String(cSheet.getRange(cr, 2).getValue() || '');
+      if (!cId || cName.indexOf('?') !== -1) {
+        cSheet.deleteRow(cr);
+        cCount++;
+      }
+    }
+  }
+  Logger.log("Deleted " + count + " ghost transactions and " + cCount + " ghost cycles");
 }
 
 function formatTxRow(data) {

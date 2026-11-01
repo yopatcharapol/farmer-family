@@ -80,6 +80,8 @@ export async function clearAllData() {
   await db.settings.update('default', { activeCycleId: '' });
   try {
     localStorage.removeItem('farmer_deleted_tx_ids');
+    localStorage.removeItem('farmer_deleted_cycle_ids');
+    localStorage.removeItem('farmer_pending_cycle_deletes');
   } catch (e) {}
 }
 
@@ -104,16 +106,56 @@ export async function purgeGhostTransactions(): Promise<number> {
   return ghosts.length;
 }
 
+// ฟังก์ชันกวาดล้างแปลงที่ถูกลบและแปลงผีชื่อเสีย '?' (Purge Deleted & Corrupted Cycles)
+export async function purgeDeletedCycles(): Promise<number> {
+  let count = 0;
+  try {
+    const raw = localStorage.getItem('farmer_deleted_cycle_ids') || '[]';
+    const deletedIds: string[] = JSON.parse(raw);
+
+    const badCycles = await db.cycles
+      .filter(c => (
+        deletedIds.includes(c.id) ||
+        c.status === 'deleted' ||
+        (c as any).isDeleted === true ||
+        c.name.includes('?') ||
+        c.name === '???? - ??????'
+      ))
+      .toArray();
+
+    if (badCycles.length > 0) {
+      count = badCycles.length;
+      const ids = badCycles.map(c => c.id);
+      await db.cycles.bulkDelete(ids);
+
+      // กวาดล้างรายการบัญชีและบันทึกแปลงที่ผูกกับแปลงที่ถูกลบ
+      for (const id of ids) {
+        await db.transactions.where('cycleId').equals(id).delete();
+        await db.plotLogs.where('plotId').equals(id).delete();
+      }
+    }
+  } catch (e) {
+    console.error('Error in purgeDeletedCycles:', e);
+  }
+  return count;
+}
+
 // ฟังก์ชันสแกนและซ่อมแซมข้อมูลอัตโนมัติ (Data Integrity & Auto-Repair)
 export async function repairDataIntegrity(): Promise<{ repairedCount: number; details: string[] }> {
   let repairedCount = 0;
   const details: string[] = [];
 
-  // 1. กวาดล้างรายการผี 0 บาท
+  // 1. กวาดล้างรายการผี 0 บาท และแปลงที่ถูกลบ
   const purgedGhosts = await purgeGhostTransactions();
   if (purgedGhosts > 0) {
     repairedCount += purgedGhosts;
     details.push(`กวาดล้างรายการผี 0 บ. ออกจากระบบ ${purgedGhosts} รายการ`);
+  }
+
+  const purgedCycles = await purgeDeletedCycles();
+  if (purgedCycles > 0) {
+    repairedCount += purgedCycles;
+    details.push(`กวาดล้างแปลงที่ถูกลบ/แปลงผีชื่อเสีย '?' ออกจากระบบ ${purgedCycles} แปลง`);
   }
 
   // 2. ซ่อมแซม Transactions ที่มี NaN หรือฟิลด์สำคัญตกหล่น
@@ -164,12 +206,11 @@ export async function repairDataIntegrity(): Promise<{ repairedCount: number; de
     }
   }
 
-  // 4. ตรวจสอบแปลงที่ชื่อเสีย ????
-  const badCycles = await db.cycles.filter(c => c.name.includes('?')).toArray();
-  for (const b of badCycles) {
-    await db.cycles.update(b.id, { name: 'แปลง - ผักกาด (ฟื้นฟู)', cropType: 'ผักกาด' });
-    repairedCount++;
-    details.push(`ฟื้นฟูชื่อแปลง "${b.id}" ที่มีอักขระ ?`);
+  // 4. ตรวจสอบแปลงที่ชื่อเสีย ???? ทำการกวาดล้างทิ้งเด็ดขาด
+  const badCyclesCount = await purgeDeletedCycles();
+  if (badCyclesCount > 0) {
+    repairedCount += badCyclesCount;
+    details.push(`กวาดล้างแปลงที่ชื่อเสียหรือถูกลบตกค้าง ${badCyclesCount} แปลง`);
   }
 
   return { repairedCount, details };
@@ -185,9 +226,10 @@ export async function initializeDatabase() {
     }
   }
 
-  // ล้างรายการผี 0 บาททันทีตอนเปิดแอป
+  // ล้างรายการผี 0 บาท และแปลงที่ถูกลบทันทีตอนเปิดแอป
   try {
     await purgeGhostTransactions();
+    await purgeDeletedCycles();
   } catch (e) {
     // ignore
   }
