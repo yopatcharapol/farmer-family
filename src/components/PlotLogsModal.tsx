@@ -205,3 +205,4 @@ export const PlotLogsModal: React.FC<PlotLogsModalProps> = ({
     </div>
   );
 };
+

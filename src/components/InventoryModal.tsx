@@ -263,3 +263,4 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({ isOpen, onClose 
     </div>
   );
 };
+

@@ -157,3 +157,4 @@ export const PlotComparisonModal: React.FC<PlotComparisonModalProps> = ({
     </div>
   );
 };
+

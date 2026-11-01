@@ -39,10 +39,6 @@ export class FarmDatabase extends Dexie {
     });
 
     // Version 3: รองรับ 21 ฟีเจอร์ใหม่ครบวงจร
-    // - transactions: paidBy, paymentStatus (สด/เชื่อ), isDeleted, updatedAt
-    // - cycles: status, closedAt
-    // - plotLogs: สมุดบันทึกกิจกรรมประจำแปลง (รดน้ำ, โรคแมลง, ปุ๋ย)
-    // - inventory: คลังสต็อกปัจจัยการผลิต (ปุ๋ย/ยาคงเหลือ)
     this.version(3).stores({
       cycles: 'id, name, status, startDate, createdAt, closedAt',
       transactions: 'id, cycleId, type, category, recordedBy, paidBy, paymentStatus, date, syncStatus, isDeleted, createdAt, updatedAt',
@@ -50,7 +46,6 @@ export class FarmDatabase extends Dexie {
       inventory: 'id, itemName, category, updatedAt',
       settings: 'id'
     }).upgrade(async (tx) => {
-      // 1. ไมเกรต transactions: เติมค่าดีฟอลต์ให้ข้อมูลเดิม
       await tx.table('transactions').toCollection().modify((t: any) => {
         if (!t.paymentStatus) t.paymentStatus = 'paid';
         if (!t.paidBy) t.paidBy = t.recordedBy || 'dad';
@@ -59,12 +54,10 @@ export class FarmDatabase extends Dexie {
         if (!t.syncStatus) t.syncStatus = t.synced ? 'synced' : 'pending';
       });
 
-      // 2. ไมเกรต cycles: เติม status
       await tx.table('cycles').toCollection().modify((c: any) => {
         if (!c.status) c.status = 'active';
       });
 
-      // 3. ไมเกรต settings: เติม familyMembers, fontSizeScale, resetPin
       await tx.table('settings').toCollection().modify((s: any) => {
         if (!s.fontSizeScale) s.fontSizeScale = 'normal';
         if (!s.resetPin) s.resetPin = '1234';
@@ -85,6 +78,30 @@ export async function clearAllData() {
   await db.plotLogs.clear();
   await db.inventory.clear();
   await db.settings.update('default', { activeCycleId: '' });
+  try {
+    localStorage.removeItem('farmer_deleted_tx_ids');
+  } catch (e) {}
+}
+
+// ฟังก์ชันกวาดล้างรายการผี 0 บ. (Ghost Transactions Purge)
+export async function purgeGhostTransactions(): Promise<number> {
+  const ghosts = await db.transactions
+    .filter(t => (
+      Number(t.amount) === 0 && (
+        !t.title ||
+        t.title === 'รายการ' ||
+        t.title === 'ทั่วไป' ||
+        t.id === 'test-dummy-id' ||
+        t.categoryLabel === 'ทั่วไป'
+      )
+    ) || t.isDeleted === true)
+    .toArray();
+
+  if (ghosts.length > 0) {
+    const ids = ghosts.map(g => g.id);
+    await db.transactions.bulkDelete(ids);
+  }
+  return ghosts.length;
 }
 
 // ฟังก์ชันสแกนและซ่อมแซมข้อมูลอัตโนมัติ (Data Integrity & Auto-Repair)
@@ -92,7 +109,14 @@ export async function repairDataIntegrity(): Promise<{ repairedCount: number; de
   let repairedCount = 0;
   const details: string[] = [];
 
-  // 1. ซ่อมแซม Transactions ที่มี NaN หรือฟิลด์สำคัญตกหล่น
+  // 1. กวาดล้างรายการผี 0 บาท
+  const purgedGhosts = await purgeGhostTransactions();
+  if (purgedGhosts > 0) {
+    repairedCount += purgedGhosts;
+    details.push(`กวาดล้างรายการผี 0 บ. ออกจากระบบ ${purgedGhosts} รายการ`);
+  }
+
+  // 2. ซ่อมแซม Transactions ที่มี NaN หรือฟิลด์สำคัญตกหล่น
   const allTxs = await db.transactions.toArray();
   for (const t of allTxs) {
     let modified = false;
@@ -130,7 +154,7 @@ export async function repairDataIntegrity(): Promise<{ repairedCount: number; de
     }
   }
 
-  // 2. ซ่อมแซม สต็อก Inventory ที่ติดลบ
+  // 3. ซ่อมแซม สต็อก Inventory ที่ติดลบ
   const invItems = await db.inventory.toArray();
   for (const item of invItems) {
     if (item.remaining < 0) {
@@ -140,7 +164,7 @@ export async function repairDataIntegrity(): Promise<{ repairedCount: number; de
     }
   }
 
-  // 3. ตรวจสอบแปลงที่ชื่อเสีย ????
+  // 4. ตรวจสอบแปลงที่ชื่อเสีย ????
   const badCycles = await db.cycles.filter(c => c.name.includes('?')).toArray();
   for (const b of badCycles) {
     await db.cycles.update(b.id, { name: 'แปลง - ผักกาด (ฟื้นฟู)', cropType: 'ผักกาด' });
@@ -153,7 +177,6 @@ export async function repairDataIntegrity(): Promise<{ repairedCount: number; de
 
 // เริ่มต้นระบบแบบคลีน 100% พร้อม Backward Compatibility
 export async function initializeDatabase() {
-  // ขอสิทธิ์ Persistent Storage จากบราวเซอร์เพื่อป้องกันระบบล้างแคชทิ้ง (Local-First Hardening)
   if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.persist) {
     try {
       await navigator.storage.persist();
@@ -162,7 +185,14 @@ export async function initializeDatabase() {
     }
   }
 
-  // ล้างข้อมูลตัวอย่างเดิม (mock data) ถ้ายังค้างอยู่ในเครื่อง
+  // ล้างรายการผี 0 บาททันทีตอนเปิดแอป
+  try {
+    await purgeGhostTransactions();
+  } catch (e) {
+    // ignore
+  }
+
+  // ล้างข้อมูลตัวอย่างเดิม (mock data)
   try {
     const sampleCycle = await db.cycles.get('cycle-rice-2026');
     if (sampleCycle) {
@@ -190,7 +220,6 @@ export async function initializeDatabase() {
       familyMembers: DEFAULT_FAMILY_MEMBERS
     });
   } else {
-    // ตรวจสอบและอัปเดตฟิลด์ใหม่ให้ settings เดิม
     const current = await db.settings.get('default');
     if (current) {
       const updates: Partial<AppSettings> = {};

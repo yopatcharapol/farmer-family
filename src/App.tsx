@@ -1,6 +1,6 @@
 import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db, initializeDatabase } from './db/db';
+import { db, initializeDatabase, purgeGhostTransactions } from './db/db';
 import {
   TransactionType,
   CropCycle,
@@ -51,7 +51,8 @@ import {
   updateTransactionInGoogleSheets,
   deleteTransactionFromGoogleSheets,
   pushCycleToGoogleSheets,
-  syncPendingQueue
+  syncPendingQueue,
+  markTransactionAsDeleted
 } from './services/cloudSync';
 import { RefreshCw, Wrench } from 'lucide-react';
 
@@ -151,6 +152,7 @@ export function App() {
     const syncParam = urlParams.get('sync');
 
     initializeDatabase().then(async () => {
+      await purgeGhostTransactions();
       let activeWebhook = '';
 
       if (syncParam) {
@@ -220,7 +222,9 @@ export function App() {
 
   const transactions = useLiveQuery(
     async () => {
-      const allTx = await db.transactions.filter((t) => !t.isDeleted).toArray();
+      const allTx = await db.transactions
+        .filter((t) => !t.isDeleted && !(Number(t.amount) === 0 && (t.title === 'รายการ' || !t.title || t.categoryLabel === 'ทั่วไป' || t.id === 'test-dummy-id')))
+        .toArray();
       if (viewPeriod === 'cycle') {
         if (!currentCycle) return allTx.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
         return allTx
@@ -368,13 +372,14 @@ export function App() {
 
   // [#2] ลบรายการ (Two-way delete sync)
   const handleDeleteTransaction = async (id: string) => {
+    markTransactionAsDeleted(id);
+    await db.transactions.delete(id);
+
     const currentSettings = await db.settings.get('default');
     const targetUrl = currentSettings?.googleSheetWebhookUrl || DEFAULT_WEBHOOK_URL;
 
     if (targetUrl) {
       await deleteTransactionFromGoogleSheets(targetUrl, id);
-    } else {
-      await db.transactions.delete(id);
     }
     setToastMessage('🗑️ ลบรายการเรียบร้อย');
   };
@@ -477,10 +482,12 @@ export function App() {
       return;
     }
     setIsSyncing(true);
+    await purgeGhostTransactions();
     const currentSettings = await db.settings.get('default');
     const targetUrl = currentSettings?.googleSheetWebhookUrl || DEFAULT_WEBHOOK_URL;
     await syncPendingQueue(targetUrl);
     const res = await syncFromGoogleSheets(targetUrl);
+    await purgeGhostTransactions();
     setIsSyncing(false);
     alert(res.message);
   };
@@ -720,6 +727,9 @@ export function App() {
         onClose={() => setIsDebugConsoleOpen(false)}
         systemErrors={systemErrors}
         onClearErrors={() => setSystemErrors([])}
+        onRefreshData={async () => {
+          await purgeGhostTransactions();
+        }}
       />
 
       <Suspense fallback={null}>

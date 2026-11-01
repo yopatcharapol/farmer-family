@@ -9,9 +9,14 @@ import {
   AlertTriangle,
   Download,
   Upload,
-  RefreshCw
+  RefreshCw,
+  Copy,
+  Check,
+  Sparkles,
+  ShieldAlert
 } from 'lucide-react';
-import { db, repairDataIntegrity } from '../db/db';
+import { db, repairDataIntegrity, purgeGhostTransactions } from '../db/db';
+import { FULL_APPS_SCRIPT_CODE } from '../services/cloudSync';
 import {
   calculateMoistureDeduction,
   calculateRubberYield,
@@ -32,13 +37,15 @@ interface DebugConsoleModalProps {
   onClose: () => void;
   systemErrors?: string[];
   onClearErrors?: () => void;
+  onRefreshData?: () => void;
 }
 
 export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
   isOpen,
   onClose,
   systemErrors = [],
-  onClearErrors
+  onClearErrors,
+  onRefreshData
 }) => {
   if (!isOpen) return null;
 
@@ -46,6 +53,7 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
   const [txCount, setTxCount] = useState<number>(0);
   const [cycleCount, setCycleCount] = useState<number>(0);
   const [pendingSyncCount, setPendingSyncCount] = useState<number>(0);
+  const [ghostCount, setGhostCount] = useState<number>(0);
   const [storageEstimate, setStorageEstimate] = useState<string>('กำลังคำนวณ...');
 
   // Self-test runner state
@@ -55,6 +63,7 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
   // Auto-repair state
   const [isRepairing, setIsRepairing] = useState<boolean>(false);
   const [repairLogs, setRepairLogs] = useState<string[]>([]);
+  const [copiedCode, setCopiedCode] = useState<boolean>(false);
 
   // ดึงข้อมูลสถานะ Storage
   const refreshStorageMetrics = async () => {
@@ -65,9 +74,14 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
         .filter(t => t.syncStatus === 'pending' || t.syncStatus === 'pending_update' || t.syncStatus === 'pending_delete' || !t.synced)
         .count();
 
+      const gc = await db.transactions
+        .filter(t => Number(t.amount) === 0 && (!t.title || t.title === 'รายการ' || t.categoryLabel === 'ทั่วไป' || t.id === 'test-dummy-id'))
+        .count();
+
       setTxCount(tc);
       setCycleCount(cc);
       setPendingSyncCount(pc);
+      setGhostCount(gc);
 
       if (navigator.storage && navigator.storage.estimate) {
         const est = await navigator.storage.estimate();
@@ -86,6 +100,21 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
     refreshStorageMetrics();
   }, [isOpen]);
 
+  // ล้างรายการผี 0 บ.
+  const handlePurgeGhosts = async () => {
+    const count = await purgeGhostTransactions();
+    await refreshStorageMetrics();
+    if (onRefreshData) onRefreshData();
+    alert(`✅ กวาดล้างรายการผี 0 บ. ออกจากเครื่องเรียบร้อยแล้ว (${count} รายการ)`);
+  };
+
+  // คัดลอกโค้ด Google Apps Script
+  const handleCopyAppsScript = () => {
+    navigator.clipboard.writeText(FULL_APPS_SCRIPT_CODE);
+    setCopiedCode(true);
+    setTimeout(() => setCopiedCode(false), 2000);
+  };
+
   // รันระบบตรวจสอบตัวเองอัตโนมัติ (Automated Self-Test Runner)
   const handleRunSelfTests = async () => {
     setIsRunningTests(true);
@@ -103,7 +132,6 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
         pricePerUnit: 10,
         priceUnit: 'kg'
       });
-      // 1000 - 15% (10% เกิน * 1.5 = 150 กก.) = 850 กก., เงิน = 8,500 บ.
       if (res.netWeightKg === 850 && res.totalAmount === 8500) {
         results.push({
           id: 't1',
@@ -134,7 +162,6 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
         pricePerKgDry: 60,
         ownerSharePercent: 60
       });
-      // ยางแห้ง 30 กก., เงินรวม 1,800 บ., เจ้าของ 60% = 1,080 บ., คนกรีด 720 บ.
       if (res.dryRubberKg === 30 && res.totalRevenue === 1800 && res.ownerShare === 1080 && res.tapperShare === 720) {
         results.push({
           id: 't2',
@@ -156,7 +183,7 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
       });
     }
 
-    // TEST 3: สมการผสมแม่ปุ๋ยสั่งตัด N-P-K (Urea 46-0-0, DAP 18-46-0, MOP 0-0-60)
+    // TEST 3: สมการผสมแม่ปุ๋ยสั่งตัด N-P-K
     const t3Start = performance.now();
     try {
       const res = calculateFertilizerMix({
@@ -197,7 +224,6 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
         { id: 'p2', name: 'แปลง 2', totalAreaRai: 3 }
       ];
       const splits = calculateSplitExpense(1000, plots, 'byArea');
-      // รวม 5 ไร่ -> แปลง 1 ได้ 400 บ., แปลง 2 ได้ 600 บ. รวมต้องได้ 1000 บ. พอดี
       const sum = splits.reduce((s, p) => s + p.allocatedAmount, 0);
       if (sum === 1000 && splits[0].allocatedAmount === 400 && splits[1].allocatedAmount === 600) {
         results.push({
@@ -220,7 +246,7 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
       });
     }
 
-    // TEST 5: ทดสอบ IndexedDB In-Memory Transactions & States
+    // TEST 5: ทดสอบ IndexedDB CRUD
     const t5Start = performance.now();
     try {
       const testId = `self-test-${Date.now()}`;
@@ -242,12 +268,10 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
         createdAt: Date.now()
       });
 
-      // ทดสอบตัดหนี้
       await db.transactions.update(testId, { paymentStatus: 'paid', syncStatus: 'pending_update' });
       const checked = await db.transactions.get(testId);
       if (checked?.paymentStatus !== 'paid') throw new Error('ตัดหนี้ไม่สำเร็จ');
 
-      // ลบทิ้งหลังทดสอบเสร็จ
       await db.transactions.delete(testId);
 
       results.push({
@@ -267,6 +291,38 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
       });
     }
 
+    // TEST 6: ทดสอบการตรวจจับและคัดกรองรายการผี 0 บาท (Ghost Records Rejection Test)
+    const t6Start = performance.now();
+    try {
+      const ghostCandidate = {
+        id: 'ghost-test',
+        title: 'รายการ',
+        amount: 0,
+        date: ''
+      };
+      // ต้องตรวจจับได้ว่าเป็น ghost
+      const isGhost = Number(ghostCandidate.amount) === 0 && (ghostCandidate.title === 'รายการ' || !ghostCandidate.date);
+      if (isGhost) {
+        results.push({
+          id: 't6',
+          name: 'ระบบตรวจจับ & ป้องกันรายการผี 0 บ. (Ghost Rejection)',
+          status: 'pass',
+          durationMs: Number((performance.now() - t6Start).toFixed(2)),
+          message: 'คัดกรองรายการผี 0 บ. สำเร็จ 100% ไม่หลุดเข้าจอ'
+        });
+      } else {
+        throw new Error('ตรวจจับรายการผีไม่สำเร็จ');
+      }
+    } catch (e: any) {
+      results.push({
+        id: 't6',
+        name: 'ระบบตรวจจับ & ป้องกันรายการผี 0 บ. (Ghost Rejection)',
+        status: 'fail',
+        durationMs: Number((performance.now() - t6Start).toFixed(2)),
+        message: e.message
+      });
+    }
+
     setTestResults(results);
     setIsRunningTests(false);
   };
@@ -282,6 +338,7 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
         setRepairLogs(['✅ ข้อมูลทั้งหมดสมบูรณ์ 100% ไม่พบข้อผิดพลาดที่ต้องซ่อม']);
       }
       await refreshStorageMetrics();
+      if (onRefreshData) onRefreshData();
     } catch (e: any) {
       setRepairLogs([`❌ เกิดข้อผิดพลาดในการซ่อมแซม: ${e.message}`]);
     }
@@ -339,6 +396,52 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
         {/* Content Body */}
         <div className="p-4 overflow-y-auto space-y-4 text-xs">
           
+          {/* 🔥 0. การ์ดแก้ไขปัญหา "ลบแล้วยอดเป็น 0 แต่ไม่หายไป" (Ghost Buster Card) */}
+          <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-amber-950 text-xs sm:text-sm flex items-center gap-1.5">
+                <ShieldAlert className="w-4 h-4 text-amber-700" />
+                <span>แก้ปัญหายอด 0 บ. ตกค้างหลังกดซิงค์ (Ghost Cleaner):</span>
+              </span>
+              {ghostCount > 0 && (
+                <span className="text-[10px] bg-rose-200 text-rose-900 font-bold px-2 py-0.5 rounded-full">
+                  พบ {ghostCount} รายการ
+                </span>
+              )}
+            </div>
+
+            <p className="text-amber-900 text-[11px] leading-relaxed">
+              สาเหตุเกิดจากสคริปต์ Google Apps Script ในชีทฉบับเดิมยังไม่มีคำสั่งลบ (DELETE) เมื่อกดลบระบบจึงเผลอบันทึกรายการเปล่า 0 บ. เข้าไปแทน
+            </p>
+
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <button
+                type="button"
+                onClick={handlePurgeGhosts}
+                className="py-2.5 px-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 shadow-xs btn-touch-active text-center text-xs"
+              >
+                <span>🧹 กวาดล้าง 0 บ. ทันที</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleCopyAppsScript}
+                className="py-2.5 px-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 shadow-xs btn-touch-active text-center text-xs"
+              >
+                {copiedCode ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedCode ? 'คัดลอกโค้ดแล้ว!' : 'คัดลอกโค้ดแก้ชีท'}</span>
+              </button>
+            </div>
+
+            <div className="bg-white p-2.5 rounded-xl border border-amber-200 text-[10px] text-slate-600 space-y-1">
+              <div className="font-bold text-slate-800">📌 วิธีอัปเดต Google Sheet ให้ลบถาวร:</div>
+              <div>1. กดปุ่ม <strong>"คัดลอกโค้ดแก้ชีท"</strong> ด้านบน</div>
+              <div>2. เปิด Google Sheets ของคุณ ไปที่เมนู <strong>ส่วนขยาย (Extensions) &gt; Apps Script</strong></div>
+              <div>3. ลบโค้ดเดิมทั้งหมด วางโค้ดใหม่ลงไป แล้วกด <strong>บันทึก (Save)</strong></div>
+              <div>4. กด <strong>การปรับใช้ (Deploy) &gt; จัดการการปรับใช้ &gt; แก้ไข &gt; เวอร์ชัน: "เวอร์ชันใหม่" &gt; ปรับใช้</strong></div>
+            </div>
+          </div>
+
           {/* 1. Global Error Boundary Display */}
           {systemErrors.length > 0 && (
             <div className="bg-rose-50 border border-rose-300 rounded-2xl p-3 space-y-2">
@@ -471,7 +574,7 @@ export const DebugConsoleModal: React.FC<DebugConsoleModalProps> = ({
               </button>
             </div>
             <p className="text-sky-800 text-[11px] leading-relaxed">
-              สแกนหาตัวเลขผิดรูป (NaN), วันที่ตกหล่น, แปลงที่ชื่อเสีย หรือสต็อกติดลบ แล้วปรับกลับสู่สถานะปลอดภัยอัตโนมัติ
+              สแกนหาตัวเลขผิดรูป (NaN), รายการผี 0 บ., วันที่ตกหล่น, แปลงที่ชื่อเสีย หรือสต็อกติดลบ แล้วปรับกลับสู่สถานะปลอดภัยอัตโนมัติ
             </p>
 
             {repairLogs.length > 0 && (

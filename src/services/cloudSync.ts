@@ -1,22 +1,44 @@
-import { db } from '../db/db';
+import { db, purgeGhostTransactions } from '../db/db';
 import { Transaction, CropCycle } from '../types';
 import { getTodayIso } from '../utils/thaiAgUnits';
 
 /**
  * บริการซิงค์ข้อมูลสองทางกับ Google Sheets (Two-Way Cloud Sync)
- * รองรับการ เพิ่ม (INSERT), แก้ไข (UPDATE), และ ลบ (DELETE)
+ * พร้อมระบบคัดกรองและป้องกันรายการผี 0 บ. (Ghost Records Protection)
  */
 
 export const DEFAULT_WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycbyL_T7Us7Irx9FI0eP_XjwPv6tDSdmx4zPHZGOFVq2RWocVJT_m-upr_dmijpYSemGHmQ/exec';
 
+// บันทึก ID รายการที่เคยถูกลบ เพื่อป้องกันการดึงกลับมาทับซ้ำ (Tombstone Protection)
+export function markTransactionAsDeleted(id: string) {
+  try {
+    const raw = localStorage.getItem('farmer_deleted_tx_ids') || '[]';
+    const list: string[] = JSON.parse(raw);
+    if (!list.includes(id)) {
+      list.push(id);
+      localStorage.setItem('farmer_deleted_tx_ids', JSON.stringify(list.slice(-500)));
+    }
+  } catch (e) {}
+}
+
+export function isTransactionDeleted(id: string): boolean {
+  try {
+    const raw = localStorage.getItem('farmer_deleted_tx_ids') || '[]';
+    const list: string[] = JSON.parse(raw);
+    return list.includes(id);
+  } catch (e) {
+    return false;
+  }
+}
+
 // แปลงรูปแบบวันที่เป็น YYYY-MM-DD เสมอ
 function toIsoDate(val: any): string {
-  if (!val) return getTodayIso();
+  if (!val) return '';
   if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(val.trim())) {
     return val.trim();
   }
   const d = new Date(val);
-  if (isNaN(d.getTime())) return getTodayIso();
+  if (isNaN(d.getTime())) return '';
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
@@ -31,6 +53,9 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
   }
 
   try {
+    // ล้างรายการผี 0 บาทในเครื่องก่อนเริ่มซิงค์
+    await purgeGhostTransactions();
+
     const response = await fetch(targetUrl, {
       method: 'GET',
       headers: {
@@ -69,8 +94,8 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
           areaRai: Number(c.areaRai) || 0,
           areaNgan: Number(c.areaNgan) || 2,
           areaSqWa: Number(c.areaSqWa) || 0,
-          startDate: toIsoDate(c.startDate),
-          expectedHarvestDate: toIsoDate(c.expectedHarvestDate),
+          startDate: toIsoDate(c.startDate) || getTodayIso(),
+          expectedHarvestDate: toIsoDate(c.expectedHarvestDate) || getTodayIso(),
           expectedYieldKg: Number(c.expectedYieldKg) || 1250,
           targetPricePerKg: Number(c.targetPricePerKg) || 15,
           status: c.status === 'closed' ? 'closed' : 'active',
@@ -90,16 +115,34 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
       if (firstCycle) primaryCycleId = firstCycle.id;
     }
 
-    // 1.2 ซิงค์รายการบันทึก (Transactions) จาก Google Sheets ลงเครื่อง
+    // 1.2 ซิงค์รายการบันทึก (Transactions) จาก Google Sheets ลงเครื่อง พร้อมคัดกรองรายการผี 0 บ.
     if (data.transactions && Array.isArray(data.transactions) && data.transactions.length > 0) {
       for (const t of data.transactions) {
-        if (!t.id && !t.title) continue;
-        const txId = String(t.id || `tx-${Date.now()}-${Math.random()}`);
-        
-        // ตรวจสอบว่าในเครื่องมีรายการนี้ที่ติด pending_update / pending_delete หรือไม่
+        if (!t.id) continue;
+        const txId = String(t.id);
+
+        // ตรวจสอบว่าเคยลบรายการนี้ไปแล้วหรือไม่
+        if (isTransactionDeleted(txId)) {
+          continue;
+        }
+
+        // คัดกรองรายการผี 0 บาท ที่ไม่มีข้อมูลจริงทิ้งเด็ดขาด
+        const amt = Number(t.amount) || 0;
+        const titleStr = String(t.title || '').trim();
+        const catStr = String(t.categoryLabel || '').trim();
+        const dateRaw = String(t.date || '').trim();
+
+        if (
+          (amt === 0 && (titleStr === 'รายการ' || titleStr === '' || catStr === 'ทั่วไป' || !dateRaw)) ||
+          txId === 'test-dummy-id'
+        ) {
+          // ข้ามแถวผี 0 บาท ไม่บันทึกลง IndexedDB
+          continue;
+        }
+
+        // ตรวจสอบว่าในเครื่องมีรายการนี้ที่ติด pending_update หรือ pending_delete หรือไม่
         const localTx = await db.transactions.get(txId);
-        if (localTx && (localTx.syncStatus === 'pending_update' || localTx.syncStatus === 'pending_delete')) {
-          // อย่าเขียนทับการเปลี่ยนแปลงที่ยังค้างส่งในเครื่อง
+        if (localTx && (localTx.syncStatus === 'pending_update' || localTx.syncStatus === 'pending_delete' || localTx.isDeleted)) {
           continue;
         }
 
@@ -114,8 +157,8 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
           type: String(t.type).trim() === 'income' ? 'income' : 'expense',
           category: (t.category as any) || (t.type === 'income' ? 'main_crop' : 'labor'),
           categoryLabel: String(t.categoryLabel || 'ทั่วไป'),
-          title: String(t.title || 'รายการ'),
-          amount: Number(t.amount) || 0,
+          title: titleStr || 'รายการ',
+          amount: amt,
           quantity: Number(t.quantity) || 1,
           unit: String(t.unit || ''),
           unitPrice: Number(t.unitPrice) || 0,
@@ -123,7 +166,7 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
           paidBy: String(t.paidBy || t.recordedBy || 'dad'),
           paymentStatus: t.paymentStatus === 'credit' ? 'credit' : 'paid',
           creditorName: t.creditorName ? String(t.creditorName) : undefined,
-          date: toIsoDate(t.date),
+          date: toIsoDate(t.date) || getTodayIso(),
           notes: String(t.notes || ''),
           harvestWeight: t.harvestWeight ? Number(t.harvestWeight) : undefined,
           synced: true,
@@ -141,6 +184,9 @@ export async function syncFromGoogleSheets(webhookUrl: string): Promise<{ succes
     if (primaryCycleId) {
       await db.transactions.where('cycleId').equals('default').modify({ cycleId: primaryCycleId });
     }
+
+    // ตรวจสอบล้างรายการผี 0 บาทรอบสุดท้าย
+    await purgeGhostTransactions();
 
     return {
       success: true,
@@ -223,17 +269,16 @@ export async function updateTransactionInGoogleSheets(webhookUrl: string, transa
   }
 }
 
-// 2.2 ส่งคำสั่งลบรายการ (DELETE)
+// 2.2 ส่งคำสั่งลบรายการ (DELETE) พร้อมบันทึก Tombstone กันเด้งกลับ
 export async function deleteTransactionFromGoogleSheets(webhookUrl: string, transactionId: string): Promise<boolean> {
+  // บันทึก ID รายการที่ถูกลบลง Tombstone ทันที
+  markTransactionAsDeleted(transactionId);
+  await db.transactions.delete(transactionId);
+
   const targetUrl = webhookUrl || DEFAULT_WEBHOOK_URL;
-  if (!targetUrl) return false;
+  if (!targetUrl) return true;
 
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    // ออฟไลน์: มาร์กไว้ว่า pending_delete เพื่อส่งลบภายหลัง
-    await db.transactions.update(transactionId, {
-      isDeleted: true,
-      syncStatus: 'pending_delete'
-    });
     return false;
   }
 
@@ -247,21 +292,14 @@ export async function deleteTransactionFromGoogleSheets(webhookUrl: string, tran
         id: transactionId
       })
     });
-
-    // ส่งลบสำเร็จแล้ว ลบออกจากฐานข้อมูล IndexedDB ในเครื่องอย่างถาวร
-    await db.transactions.delete(transactionId);
     return true;
   } catch (e) {
-    console.warn('Delete transaction from sheets failed:', e);
-    await db.transactions.update(transactionId, {
-      isDeleted: true,
-      syncStatus: 'pending_delete'
-    });
+    console.warn('Delete transaction from sheets failed (offline):', e);
     return false;
   }
 }
 
-// 2.3 ประมวลผลคิวรอส่งข้อมูล (Flush Offline Sync Queue: Add, Update, Delete)
+// 2.3 ประมวลผลคิวรอส่งข้อมูล (Flush Offline Sync Queue)
 export async function syncPendingQueue(webhookUrl: string): Promise<{ syncedCount: number; failedCount: number; message: string }> {
   const targetUrl = webhookUrl || DEFAULT_WEBHOOK_URL;
   if (!targetUrl) {
@@ -281,6 +319,7 @@ export async function syncPendingQueue(webhookUrl: string): Promise<{ syncedCoun
 
   for (const delTx of pendingDeletes) {
     try {
+      markTransactionAsDeleted(delTx.id);
       await fetch(targetUrl, {
         method: 'POST',
         mode: 'no-cors',
@@ -316,7 +355,7 @@ export async function syncPendingQueue(webhookUrl: string): Promise<{ syncedCoun
 
   // 3. ส่งรายการใหม่ที่ค้างส่ง (pending หรือ failed)
   const pendingAdds = await db.transactions
-    .filter(t => (t.syncStatus === 'pending' || t.syncStatus === 'failed' || !t.synced) && !t.isDeleted)
+    .filter(t => (t.syncStatus === 'pending' || t.syncStatus === 'failed' || !t.synced) && !t.isDeleted && Number(t.amount) > 0)
     .toArray();
 
   if (pendingAdds.length > 0) {
@@ -369,7 +408,7 @@ export async function pushCycleToGoogleSheets(webhookUrl: string, cycle: CropCyc
   }
 }
 
-// 4. สคริปต์ Google Apps Script ฉบับสมบูรณ์ (รองรับ INSERT, UPDATE, DELETE, BATCH)
+// 4. สคริปต์ Google Apps Script ฉบับสมบูรณ์ (พร้อมระบบตัดรายการผี 0 บ. อัตโนมัติ)
 export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("รายการ") || ss.getActiveSheet();
@@ -379,14 +418,25 @@ export const FULL_APPS_SCRIPT_CODE = `function doGet(e) {
   if (rows.length > 1) {
     for (var i = 1; i < rows.length; i++) {
       var r = rows[i];
-      if (!r[0] && !r[4]) continue;
+      if (!r[0]) continue;
+      
+      var amt = Number(r[5]) || 0;
+      var title = String(r[4] || '').trim();
+      var dateStr = String(r[1] ? formatDateIso(r[1]) : '').trim();
+      var rId = String(r[0] || '');
+      
+      // กรองแถวผี 0 บาท หรือแถวที่ไม่มีข้อมูลจริงทิ้งเด็ดขาด
+      if ((amt === 0 && (title === 'รายการ' || title === '' || !dateStr)) || rId === 'test-dummy-id') {
+        continue;
+      }
+
       transactions.push({
-        id: String(r[0] || ('tx-' + i)),
-        date: String(r[1] ? formatDateIso(r[1]) : ''),
+        id: rId || ('tx-' + i),
+        date: dateStr,
         type: String(r[2]).trim() === 'รายรับ' ? 'income' : 'expense',
         categoryLabel: String(r[3] || 'ทั่วไป'),
-        title: String(r[4] || 'รายการ'),
-        amount: Number(r[5]) || 0,
+        title: title || 'รายการ',
+        amount: amt,
         quantity: Number(r[6]) || 1,
         unit: String(r[7] || ''),
         recordedBy: mapRecorder(r[8]),
@@ -474,7 +524,7 @@ function doPost(e) {
     sheet.appendRow(["รหัสรายการ (ID)", "วันที่", "ประเภท", "หมวดหมู่", "ชื่อรายการ", "ยอดเงิน", "จำนวน", "หน่วย", "ผู้บันทึก", "หมายเหตุ", "รหัสแปลง", "การจ่ายเงิน", "เจ้าหนี้/ร้านค้า", "คนควักเงิน", "น้ำหนักสุทธิ(กก)"]);
   }
 
-  // 2.1 ลบรายการ (DELETE)
+  // 2.1 ลบรายการเดี่ยว (DELETE)
   if (action === 'delete_transaction') {
     var delRow = findRowById(sheet, data.id);
     if (delRow > 0) {
@@ -483,7 +533,26 @@ function doPost(e) {
     return ContentService.createTextOutput(JSON.stringify({result: 'success', action: 'deleted'})).setMimeType(ContentService.MimeType.JSON);
   }
 
-  // 2.2 แก้ไขรายการ (UPDATE)
+  // 2.2 กวาดล้างรายการผี 0 บาททั้งหมดในแผ่นงาน (CLEAN GHOSTS)
+  if (action === 'clean_ghosts') {
+    var lastRow = sheet.getLastRow();
+    var deletedCount = 0;
+    if (lastRow > 1) {
+      for (var r = lastRow; r >= 2; r--) {
+        var rowValues = sheet.getRange(r, 1, 1, 6).getValues()[0];
+        var rId = String(rowValues[0] || '');
+        var rTitle = String(rowValues[4] || '').trim();
+        var rAmt = Number(rowValues[5]) || 0;
+        if ((rAmt === 0 && (rTitle === 'รายการ' || rTitle === '')) || rId === 'test-dummy-id') {
+          sheet.deleteRow(r);
+          deletedCount++;
+        }
+      }
+    }
+    return ContentService.createTextOutput(JSON.stringify({result: 'success', cleaned: deletedCount})).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // 2.3 แก้ไขรายการ (UPDATE)
   if (action === 'update_transaction') {
     var updRow = findRowById(sheet, data.id);
     var rowData = formatTxRow(data);
@@ -495,13 +564,14 @@ function doPost(e) {
     return ContentService.createTextOutput(JSON.stringify({result: 'success', action: 'updated'})).setMimeType(ContentService.MimeType.JSON);
   }
 
-  // 2.3 บันทึกแบบชุด (BATCH SYNC)
+  // 2.4 บันทึกแบบชุด (BATCH SYNC)
   if (action === 'batch_sync' && Array.isArray(data.transactions)) {
     var existingIds = getExistingIds(sheet);
     var rowsToAppend = [];
     for (var i = 0; i < data.transactions.length; i++) {
       var t = data.transactions[i];
       if (!t.id || existingIds[t.id]) continue;
+      if (Number(t.amount) === 0 && (String(t.title).trim() === 'รายการ' || !t.title)) continue;
       existingIds[t.id] = true;
       rowsToAppend.push(formatTxRow(t));
     }
@@ -511,7 +581,11 @@ function doPost(e) {
     return ContentService.createTextOutput(JSON.stringify({result: 'success', added: rowsToAppend.length})).setMimeType(ContentService.MimeType.JSON);
   }
 
-  // 2.4 บันทึกเดี่ยว (ADD)
+  // 2.5 บันทึกเดี่ยว (ADD) - ห้ามบันทึกรายการ 0 บาทที่มีชื่อว่า 'รายการ'
+  if (Number(data.amount) === 0 && (String(data.title).trim() === 'รายการ' || !data.title)) {
+    return ContentService.createTextOutput(JSON.stringify({result: 'skipped_ghost'})).setMimeType(ContentService.MimeType.JSON);
+  }
+
   var existRow = findRowById(sheet, data.id);
   if (existRow > 0) {
     sheet.getRange(existRow, 1, 1, formatTxRow(data).length).setValues([formatTxRow(data)]);
@@ -520,6 +594,25 @@ function doPost(e) {
   }
   
   return ContentService.createTextOutput(JSON.stringify({result: 'success'})).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ฟังก์ชันสำหรับกดรันใน Google Apps Script เพื่อล้างแถวผี 0 บ. ทันที
+function cleanGhostRows() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("รายการ") || ss.getActiveSheet();
+  var lastRow = sheet.getLastRow();
+  var count = 0;
+  for (var r = lastRow; r >= 2; r--) {
+    var rowValues = sheet.getRange(r, 1, 1, 6).getValues()[0];
+    var rTitle = String(rowValues[4] || '').trim();
+    var rAmt = Number(rowValues[5]) || 0;
+    var rId = String(rowValues[0] || '');
+    if ((rAmt === 0 && (rTitle === 'รายการ' || rTitle === '')) || rId === 'test-dummy-id') {
+      sheet.deleteRow(r);
+      count++;
+    }
+  }
+  Logger.log("Deleted " + count + " ghost rows");
 }
 
 function formatTxRow(data) {

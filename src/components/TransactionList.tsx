@@ -32,6 +32,14 @@ export const TransactionList: React.FC<TransactionListProps> = ({
   const filtered = transactions.filter((t) => {
     if (t.isDeleted) return false;
 
+    // กรองรายการผี 0 บาท ที่ไม่มีข้อมูลจริงทิ้งเด็ดขาด
+    if (
+      Number(t.amount) === 0 &&
+      (t.title === 'รายการ' || !t.title || t.categoryLabel === 'ทั่วไป' || t.id === 'test-dummy-id')
+    ) {
+      return false;
+    }
+
     // กรองสมาชิก
     if (filterMember !== 'all' && t.recordedBy !== filterMember && t.paidBy !== filterMember) {
       return false;
